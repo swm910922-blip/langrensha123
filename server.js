@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v3.2（AI 性格系統 + 警察頻道 + 多元決策）
+// 狼人殺後端 v3.3（警察共同投票查驗）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -17,7 +17,7 @@ const io = new Server(server, { cors: { origin: '*', methods: ['GET','POST'] } }
 const rooms = new Map();
 
 const PHASE_SECONDS = {
-  NIGHT_WOLF: 30, NIGHT_SEER: 20, NIGHT_DOCTOR: 20, NIGHT_SNIPER: 20,
+  NIGHT_WOLF: 30, NIGHT_SEER: 25, NIGHT_DOCTOR: 20, NIGHT_SNIPER: 20,
   DAY_ANNOUNCE: 10, DAY_DISCUSS: 60, DAY_VOTE: 30,
 };
 
@@ -180,27 +180,14 @@ const SPEECH = {
     '我是預言家，請大家跟我的票。',
     '我是警察，我可以提供驗人資訊。',
   ],
-  SEER_RESULT_GOOD: [
-    '我查了 {name}，是好人。',
-    '{name} 我可以作證，他是好人。',
-    '昨晚查驗 {name}，好人陣營。',
-    '{name} 是好人，請大家放心。',
-  ],
-  SEER_RESULT_BAD: [
-    '我查了 {name}，是壞人！',
-    '注意 {name}，他是狼人！',
-    '{name} 是邪惡陣營，我查過他。',
-    '{name} 是狼，大家投他！',
-    '我確定 {name} 是狼人，別被他騙了。',
-  ],
   POLICE: [
-    '警察頻道：{name} 很可疑，建議投他。',
+    '警察頻道：{name} 很可疑，建議查他。',
     '我建議今晚查 {name}。',
     '警察頻道：{name} 我查過了，是好人。',
     '警察頻道：{name} 我查過了，是狼人！',
     '{name} 我懷疑他，警察們注意。',
     '我覺得 {name} 有問題，我們統一戰線。',
-    '警察頻道：建議大家把票集中在 {name}。',
+    '警察頻道：建議大家把查驗集中在 {name}。',
     '今晚我會查 {name}。',
     '{name} 你先別急，我再觀察一輪。',
     '警察頻道：我直覺 {name} 是狼。',
@@ -218,9 +205,7 @@ const SPEECH = {
   ],
 };
 
-function fillTemplate(tmpl, name) {
-  return tmpl.replace(/\{name\}/g, name);
-}
+function fillTemplate(tmpl, name) { return tmpl.replace(/\{name\}/g, name); }
 function pickSpeech(category, name) {
   const pool = SPEECH[category] || SPEECH.CHAOS;
   const tmpl = randomPick(pool);
@@ -228,7 +213,7 @@ function pickSpeech(category, name) {
 }
 
 // ============================================================
-// 🧠 人類意圖解析（跟風判斷）
+// 🧠 人類意圖解析
 // ============================================================
 function getRecentHumanHints(room) {
   const humans = room.players.filter(p => !p.isAI && p.alive);
@@ -285,10 +270,7 @@ function decideTarget(room, ai, context) {
   }
 
   switch (strategy) {
-    case 'FOLLOW': {
-      const hint = randomPick(validHints);
-      return hint.targetId;
-    }
+    case 'FOLLOW': return randomPick(validHints).targetId;
     case 'CONTRARIAN': {
       const tally = tallyVotes(room);
       const sorted = candidates.slice().sort((a,b) => (tally[a.id]||0) - (tally[b.id]||0));
@@ -300,14 +282,8 @@ function decideTarget(room, ai, context) {
         if (Math.random() < 0.6) return ai.id;
         return randomPick(candidates).id;
       }
-      if (context === 'VOTE' && ai.role === 'SEER') {
-        const checked = room.seerChecks[ai.id] || {};
-        const knownWolf = candidates.find(p => checked[p.id] === 'WOLF');
-        if (knownWolf) return knownWolf.id;
-      }
       return randomPick(candidates).id;
     }
-    case 'RANDOM':
     default: {
       if (personality === 'CONSERVATIVE') {
         const speakCount = room.speakCount || {};
@@ -320,7 +296,7 @@ function decideTarget(room, ai, context) {
 }
 
 // ============================================================
-// 🗣 AI 發言決策
+// 🗣 AI 發言
 // ============================================================
 function aiSpeak(room, ai) {
   const personality = ai.personality || 'INTUITIVE';
@@ -331,55 +307,38 @@ function aiSpeak(room, ai) {
   const roll = Math.random() * 100;
   let category = 'ACCUSE';
 
-  if (ai.role === 'SEER' && Math.random() < 0.15) {
-    category = 'SEER_CLAIM';
-  }
-  else if (roll < 15 && ai.suspectedCount > 0) {
-    category = 'DEFEND';
-  }
+  if (ai.role === 'SEER' && Math.random() < 0.15) category = 'SEER_CLAIM';
+  else if (roll < 15 && ai.suspectedCount > 0) category = 'DEFEND';
   else if (hints.length && (personality === 'FOLLOWER' || Math.random() < 0.3)) {
     const hint = randomPick(hints);
-    const text = pickSpeech('FOLLOW', hint.targetName);
-    io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text });
+    io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: pickSpeech('FOLLOW', hint.targetName) });
     return;
   }
   else if (personality === 'CHAOTIC') {
-    const text = pickSpeech('CHAOS', '');
-    io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text });
+    io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: pickSpeech('CHAOS', '') });
     return;
   }
   else if (personality === 'CONSERVATIVE') {
     const speakCount = room.speakCount || {};
     const quiet = alive.slice().sort((a,b) => (speakCount[a.id]||0) - (speakCount[b.id]||0))[0];
     if (quiet) {
-      const text = pickSpeech('SILENT', quiet.name);
-      io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text });
+      io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: pickSpeech('SILENT', quiet.name) });
       return;
     }
   }
 
   const target = randomPick(alive);
-  const text = pickSpeech(category, target.name);
-  io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text });
+  io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: pickSpeech(category, target.name) });
 }
 
-// AI 警察在警察頻道發言
 function aiPoliceSpeak(room, ai, context, targetName) {
-  let text = '';
-  if (context === 'CHECK_GOOD') {
-    const tmpls = ['警察頻道：我查了 {name}，是好人。', '我昨晚查了 {name}，好人。', '{name} 我驗過了，好人陣營。'];
-    text = fillTemplate(randomPick(tmpls), targetName);
-  } else if (context === 'CHECK_BAD') {
-    const tmpls = ['警察頻道：我查了 {name}，是狼人！', '注意！{name} 是狼！', '{name} 是狼，我驗過。'];
-    text = fillTemplate(randomPick(tmpls), targetName);
-  } else if (context === 'SUGGEST') {
-    text = pickSpeech('POLICE', targetName);
-  }
-
-  room.players.filter(p => p.role === 'SEER').forEach(p => {
-    if (p.isAI) return;
-    io.to(p.id).emit('chat_message', { channel:'POLICE', from:ai.name, text });
-  });
+  let tmpls;
+  if (context === 'CHECK_GOOD') tmpls = ['警察頻道：我查了 {name}，是好人。', '我昨晚查了 {name}，好人。', '{name} 我驗過了，好人陣營。'];
+  else if (context === 'CHECK_BAD') tmpls = ['警察頻道：我查了 {name}，是狼人！', '注意！{name} 是狼！', '{name} 是狼，我驗過。'];
+  else tmpls = SPEECH.POLICE;
+  const text = fillTemplate(randomPick(tmpls), targetName);
+  room.players.filter(p => p.role === 'SEER' && !p.isAI)
+    .forEach(p => io.to(p.id).emit('chat_message', { channel:'POLICE', from:ai.name, text }));
 }
 
 function trackSpeak(room, speakerId) {
@@ -393,6 +352,76 @@ function recordPublicChat(room, fromName, text) {
 }
 
 // ============================================================
+// 🔮 警察共同查驗邏輯
+// ============================================================
+function checkSeerUnified(room) {
+  const seers = room.players.filter(p => p.role === 'SEER' && p.alive);
+  if (!seers.length) return;
+
+  // 通知所有警察彼此的投票
+  seers.forEach(s => {
+    if (s.isAI) return;
+    const mateVotes = {};
+    seers.forEach(m => {
+      if (m.id !== s.id && room.seerVotes[m.id]) {
+        mateVotes[m.id] = { name:m.name, targetName: nameOf(room, room.seerVotes[m.id]) };
+      }
+    });
+    io.to(s.id).emit('seer_teammate_votes', { votes: mateVotes });
+  });
+
+  const votedCount = seers.filter(s => room.seerVotes[s.id]).length;
+  if (votedCount === seers.length) {
+    // 所有警察都投完了 → 結算
+    resolveSeerCheck(room);
+  }
+}
+
+function resolveSeerCheck(room) {
+  if (room.seerResolved) return;
+  room.seerResolved = true;
+
+  const tally = {};
+  Object.values(room.seerVotes).forEach(v => { if(v) tally[v] = (tally[v]||0)+1; });
+  const targetId = topVoted(tally);
+
+  if (!targetId) {
+    systemMsg(room, '🔮 警察未達成共識，今晚沒有查驗結果。');
+    return setTimeout(() => nextAfterSeer(room), 1200);
+  }
+
+  const target = room.players.find(p => p.id === targetId);
+  const camp = (target.role === 'WEREWOLF' || target.role === 'SNIPER') ? 'WOLF' : 'GOOD';
+
+  // 所有警察都記錄這個查驗結果
+  room.players.filter(p => p.role === 'SEER').forEach(seer => {
+    if (!room.seerChecks[seer.id]) room.seerChecks[seer.id] = {};
+    room.seerChecks[seer.id][targetId] = camp;
+  });
+
+  // 廣播結果給所有警察
+  room.players.filter(p => p.role === 'SEER').forEach(seer => {
+    if (seer.isAI) return;
+    io.to(seer.id).emit('seer_result', {
+      targetId: targetId,
+      targetName: target.name,
+      camp: camp,
+      shared: true
+    });
+  });
+
+  // AI 警察在警察頻道發言
+  room.players.filter(p => p.role === 'SEER' && p.isAI).forEach(ai => {
+    if (ai.id === targetId) return;
+    if (Math.random() < 0.6) {
+      aiPoliceSpeak(room, ai, camp === 'WOLF' ? 'CHECK_BAD' : 'CHECK_GOOD', target.name);
+    }
+  });
+
+  setTimeout(() => nextAfterSeer(room), 2500);
+}
+
+// ============================================================
 // AI 夜晚行動
 // ============================================================
 function aiWolfPick(room, ai) {
@@ -402,7 +431,13 @@ function aiWolfPick(room, ai) {
   if (humanVotes.length) return humanVotes[0];
   return decideTarget(room, ai, 'WOLF_KILL');
 }
-function aiSeerPick(room, ai) { return decideTarget(room, ai, 'SEER_CHECK'); }
+function aiSeerPick(room, ai) {
+  // 如果有人類警察已投票 → AI 跟隨
+  const humanSeers = room.players.filter(p => p.role === 'SEER' && p.alive && !p.isAI);
+  const humanVotes = humanSeers.filter(s => room.seerVotes[s.id]).map(s => room.seerVotes[s.id]);
+  if (humanVotes.length) return humanVotes[0];
+  return decideTarget(room, ai, 'SEER_CHECK');
+}
 function aiDoctorPick(room, ai) { return decideTarget(room, ai, 'DOCTOR_HEAL'); }
 function aiSniperPick(room, ai) { return decideTarget(room, ai, 'SNIPER_SHOOT'); }
 function aiVotePick(room, ai) { return decideTarget(room, ai, 'VOTE'); }
@@ -470,19 +505,15 @@ function scheduleAiActions(room, phase) {
     });
   }
   if (phase === 'NIGHT_SEER') {
-    ais.filter(p => p.role === 'SEER').forEach(ai => {
+    ais.filter(p => p.role === 'SEER').forEach((ai, idx) => {
       setTimeout(() => {
         if (room.phase !== 'NIGHT_SEER' || !ai.alive) return;
-        if (room.seerCheckedThisNight[ai.id]) return;
+        if (room.seerVotes[ai.id]) return;
         const target = aiSeerPick(room, ai);
         if (!target) return;
-        room.seerCheckedThisNight[ai.id] = true;
-        if (!room.seerChecks[ai.id]) room.seerChecks[ai.id] = {};
-        const t = room.players.find(p => p.id === target);
-        const isWolf = (t.role === 'WEREWOLF' || t.role === 'SNIPER');
-        room.seerChecks[ai.id][target] = isWolf ? 'WOLF' : 'GOOD';
-        aiPoliceSpeak(room, ai, isWolf ? 'CHECK_BAD' : 'CHECK_GOOD', t.name);
-      }, 2000 + Math.random()*4000);
+        room.seerVotes[ai.id] = target;
+        checkSeerUnified(room);
+      }, 2500 + idx*2000 + Math.random()*3000);
     });
   }
   if (phase === 'NIGHT_DOCTOR') {
@@ -533,9 +564,7 @@ function broadcastTeammateVotes(room) {
     if (mates.length === 0) return;
     const mateVotes = {};
     mates.forEach(m => {
-      if (room.votes[m.id]) {
-        mateVotes[m.id] = { name:m.name, targetName: nameOf(room, room.votes[m.id]) };
-      }
+      if (room.votes[m.id]) mateVotes[m.id] = { name:m.name, targetName: nameOf(room, room.votes[m.id]) };
     });
     io.to(p.id).emit('teammate_votes', { stage:'DAY_VOTE', votes: mateVotes, role: p.role });
   });
@@ -548,7 +577,7 @@ function judgeSpeech(room, phase) {
   const d = room.day;
   switch (phase) {
     case 'NIGHT_WOLF':   return `天黑請閉眼。第 ${d} 夜，狼人請睜眼。`;
-    case 'NIGHT_SEER':   return '狼人請閉眼。警察請睜眼，請查驗一名玩家。';
+    case 'NIGHT_SEER':   return '狼人請閉眼。警察請睜眼，請共同決定查驗對象。';
     case 'NIGHT_DOCTOR': return '警察請閉眼。醫生請睜眼，請選擇施針對象。';
     case 'NIGHT_SNIPER': return '醫生請閉眼。狙擊手請睜眼，請選擇目標。';
     case 'DAY_ANNOUNCE': {
@@ -582,13 +611,18 @@ function phasePayload(room, player, speechText) {
   }
 
   if (room.phase === 'NIGHT_SEER' && player.role === 'SEER' && player.alive) {
-    if (room.seerCheckedThisNight[player.id]) {
-      data.selectableIds = [];
-      data.alreadyChecked = true;
-    } else {
-      data.selectableIds = aliveOthers;
-    }
+    data.selectableIds = aliveOthers;
     data.checks = room.seerChecks[player.id] || {};
+    data.mySeerVote = room.seerVotes[player.id] || null;
+    // 同伴投票狀態
+    const seerMates = room.players.filter(p => p.role === 'SEER' && p.id !== player.id);
+    const mateVotes = {};
+    seerMates.forEach(m => {
+      if (room.seerVotes[m.id]) mateVotes[m.id] = { name:m.name, targetName: nameOf(room, room.seerVotes[m.id]) };
+    });
+    data.seerTeammateVotes = mateVotes;
+    data.seerMatesCount = seerMates.length;
+    data.seerVotedCount = room.players.filter(p => p.role === 'SEER' && p.alive && room.seerVotes[p.id]).length;
   }
 
   if (room.phase === 'NIGHT_DOCTOR' && player.role === 'DOCTOR' && player.alive) {
@@ -624,6 +658,10 @@ function phasePayload(room, player, speechText) {
 }
 
 function setPhase(room, phase) {
+  if (phase === 'NIGHT_SEER') {
+    const has = room.players.some(p => p.role === 'SEER' && p.alive);
+    if (!has) return nextAfterSeer(room);
+  }
   if (phase === 'NIGHT_DOCTOR') {
     const has = room.players.some(p => p.role === 'DOCTOR' && p.alive);
     if (!has || room.doctorShotsLeft <= 0) return setPhase(room, 'NIGHT_SNIPER');
@@ -638,7 +676,10 @@ function setPhase(room, phase) {
   const sec = PHASE_SECONDS[phase] || 20;
   room.endsAt = Date.now() + sec*1000;
   if (phase === 'DAY_VOTE') room.votes = {};
-  if (phase === 'NIGHT_SEER') room.seerCheckedThisNight = {};
+  if (phase === 'NIGHT_SEER') {
+    room.seerVotes = {};
+    room.seerResolved = false;
+  }
 
   const speech = judgeSpeech(room, phase);
   room.players.forEach(p => {
@@ -660,7 +701,14 @@ function onPhaseTimeout(room, phase) {
     }
     return setPhase(room, 'NIGHT_SEER');
   }
-  if (phase === 'NIGHT_SEER')   return nextAfterSeer(room);
+  if (phase === 'NIGHT_SEER') {
+    if (!room.seerResolved) {
+      // 超時但還沒結算 → 強制結算
+      resolveSeerCheck(room);
+      return;
+    }
+    return nextAfterSeer(room);
+  }
   if (phase === 'NIGHT_DOCTOR') return nextAfterDoctor(room);
   if (phase === 'NIGHT_SNIPER') return resolveNight(room);
   if (phase === 'DAY_ANNOUNCE') return setPhase(room, 'DAY_DISCUSS');
@@ -694,7 +742,8 @@ function startGame(room) {
 
   room.day = 0;
   room.seerChecks = {};
-  room.seerCheckedThisNight = {};
+  room.seerVotes = {};
+  room.seerResolved = false;
   room.wolfVotes = {};
   room.wolfTarget = null;
   room.votes = {};
@@ -725,6 +774,8 @@ function beginNight(room) {
   room.pendingDeaths = [];
   room.doctorTarget = null;
   room.sniperTarget = null;
+  room.seerVotes = {};
+  room.seerResolved = false;
   setPhase(room, 'NIGHT_WOLF');
 }
 
@@ -840,6 +891,7 @@ function handleLeave(socket) {
     broadcastPlayers(room);
     announceDeath(room, removed, 'DISCONNECT');
     if (checkWin(room)) return;
+    if (room.phase === 'NIGHT_SEER') checkSeerUnified(room);
   }
   if (room.players.length === 0) { clearTimeout(room.timer); rooms.delete(roomId); return; }
   if (room.hostId === removed.id) {
@@ -864,7 +916,7 @@ io.on('connection', socket => {
     const roomId = genRoomId(len);
     const room = {
       roomId, hostId:socket.id, phase:'LOBBY', day:0, players:[],
-      wolfVotes:{}, wolfTarget:null, seerChecks:{}, seerCheckedThisNight:{},
+      wolfVotes:{}, wolfTarget:null, seerChecks:{}, seerVotes:{}, seerResolved:false,
       votes:{}, pendingDeaths:[], doctorTarget:null, sniperTarget:null,
       doctorShotsLeft:0, sniperShotsLeft:0, emptyShotCount:{},
       aiIntel:{}, recentPublicChat:[], speakCount:{}, timer:null, endsAt:null,
@@ -955,7 +1007,7 @@ io.on('connection', socket => {
     clearTimeout(room.timer);
     room.phase = 'LOBBY'; room.day = 0;
     room.votes = {}; room.wolfVotes = {}; room.wolfTarget = null;
-    room.seerChecks = {}; room.seerCheckedThisNight = {}; room.pendingDeaths = [];
+    room.seerChecks = {}; room.seerVotes = {}; room.seerResolved = false; room.pendingDeaths = [];
     room.doctorTarget = null; room.sniperTarget = null; room.emptyShotCount = {};
     room.aiIntel = {}; room.recentPublicChat = []; room.speakCount = {};
     room.players.forEach(p => { p.alive = true; p.role = null; p.deathCause = null; p.canSpeakInPublic = false; });
@@ -990,24 +1042,26 @@ io.on('connection', socket => {
     checkWolfUnified(room);
   });
 
+  // 🔮 警察投票查驗
   socket.on('seer_check', payload => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.phase !== 'NIGHT_SEER') return;
     const me = room.players.find(p => p.id === socket.id);
     if (!me || me.role !== 'SEER' || !me.alive) return;
-    if (room.seerCheckedThisNight[me.id]) {
-      io.to(me.id).emit('error_message', { message: '你今晚已經查驗過了。' });
+    if (room.seerVotes[me.id]) {
+      io.to(me.id).emit('error_message', { message: '你今晚已經投過票了。' });
       return;
     }
     const targetId = payload && payload.targetId;
     const target = room.players.find(p => p.id === targetId && p.alive);
     if (!target || target.id === me.id) return;
-    room.seerCheckedThisNight[me.id] = true;
-    if (!room.seerChecks[me.id]) room.seerChecks[me.id] = {};
-    const camp = (target.role === 'WEREWOLF' || target.role === 'SNIPER') ? 'WOLF' : 'GOOD';
-    room.seerChecks[me.id][target.id] = camp;
-    io.to(me.id).emit('seer_result', { targetId:target.id, targetName:target.name, camp });
-    io.to(me.id).emit('phase_changed', phasePayload(room, me, ''));
+    room.seerVotes[me.id] = targetId;
+
+    // AI 警察立即跟隨
+    const aiSeers = room.players.filter(p => p.role === 'SEER' && p.alive && p.isAI);
+    aiSeers.forEach(ai => { room.seerVotes[ai.id] = targetId; });
+
+    checkSeerUnified(room);
   });
 
   socket.on('doctor_heal', payload => {
