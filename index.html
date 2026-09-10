@@ -432,6 +432,11 @@ function BoardView(){
   });
 
   bindActionButtons(el);
+    // 🔑 聊天框自動滾到最新訊息
+  setTimeout(() => {
+    const box = el.querySelector('.chat-msgs');
+    if (box) box.scrollTop = box.scrollHeight;
+  }, 0);
   startTimer(el.querySelector('#timer'));
   return el;
 }
@@ -730,7 +735,14 @@ socket.on('chat_message', msg => {
   const ch = msg.channel || 'PUBLIC';
   if(!state.chats[ch]) state.chats[ch] = [];
   state.chats[ch].push(msg);
-  if(state.chatTab === ch) render();
+  // 🔑 只 append 訊息，不重繪整個畫面（避免輸入框被清空）
+  if(state.chatTab === ch) {
+    const box = document.querySelector('.chat-msgs');
+    if (box) {
+      box.insertAdjacentHTML('beforeend', chatMsgHTML(msg));
+      box.scrollTop = box.scrollHeight;
+    }
+  }
 });
 
 socket.on('seer_result', ({ targetName, camp }) => {
