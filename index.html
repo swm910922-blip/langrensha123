@@ -1,941 +1,743 @@
-// ============================================================
-// 狼人殺後端（加入醫生 + 狙擊手）
-// ============================================================
-const express = require('express');
-const http = require('http');
-const cors = require('cors');
-const { Server } = require('socket.io');
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="theme-color" content="#0b0e14" />
+<title>狼人殺 · 線上版（醫生 + 狙擊手）</title>
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#151a24; --panel-2:#1c2230; --line:#2a3345;
+    --text:#e6ecf5; --muted:#8b98ad; --good:#4ade80; --wolf:#f87171;
+    --accent:#7c9cff; --gold:#f5c451; --doctor:#22d3ee; --sniper:#f472b6;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+  html,body{
+    background:radial-gradient(1200px 800px at 50% -10%,#1b2436 0%,var(--bg) 60%);
+    color:var(--text);font-family:-apple-system,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+    min-height:100vh;
+  }
+  body{display:flex;flex-direction:column}
+  #app{flex:1;display:flex;flex-direction:column}
+  button{font-family:inherit;cursor:pointer;border:none;border-radius:10px;transition:.15s;touch-action:manipulation}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  input{font-family:inherit}
 
-const app = express();
-app.use(cors({ origin: '*' }));
-app.use(express.static('.'));
+  .lobby{flex:1;display:flex;align-items:center;justify-content:center;padding:20px}
+  .lobby-card{width:min(420px,92vw);background:var(--panel);border:1px solid var(--line);
+    border-radius:20px;padding:36px 32px;box-shadow:0 24px 60px rgba(0,0,0,.5);}
+  .lobby-card h1{font-size:26px;letter-spacing:4px;text-align:center;margin-bottom:8px;
+    background:linear-gradient(90deg,#7c9cff,#f5c451);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+  .sub{text-align:center;color:var(--muted);font-size:12px;margin-bottom:28px;letter-spacing:1px}
+  .field{margin-bottom:16px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px;letter-spacing:1px}
+  .field input{width:100%;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);
+    border-radius:10px;color:var(--text);font-size:16px;outline:none;transition:.15s;}
+  .field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,156,255,.15)}
+  .btn{width:100%;padding:14px;font-size:15px;font-weight:600;letter-spacing:1px;color:#fff;
+    background:linear-gradient(135deg,#4a6bff,#7c9cff);}
+  .btn:hover:not(:disabled){filter:brightness(1.1)}
+  .btn.ghost{background:var(--panel-2);border:1px solid var(--line);color:var(--text)}
+  .btn.wolf{background:linear-gradient(135deg,#b91c1c,#ef4444)}
+  .btn.good{background:linear-gradient(135deg,#15803d,#4ade80)}
+  .btn.gold{background:linear-gradient(135deg,#b8860b,#f5c451);color:#241a00}
+  .btn.doctor{background:linear-gradient(135deg,#0891b2,#22d3ee)}
+  .btn.sniper{background:linear-gradient(135deg,#be185d,#f472b6)}
+  .hint{font-size:12px;color:var(--muted);text-align:center;margin-top:16px;line-height:1.7}
+  .err{color:var(--wolf);font-size:13px;text-align:center;margin-top:12px;min-height:18px}
 
-app.get('/', (req, res) => {
-  res.send('🐺 狼人殺伺服器運作中');
-});
+  .room{padding:24px;flex:1;overflow-y:auto}
+  .room-head{display:flex;justify-content:space-between;align-items:center;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 22px;margin-bottom:20px;
+    gap:12px;flex-wrap:wrap;}
+  .room-code{font-size:12px;color:var(--muted);letter-spacing:2px}
+  .room-code b{color:var(--gold);font-size:22px;letter-spacing:6px;display:block;margin-top:4px}
+  .players-wait{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px}
+  .pw{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px;text-align:center;font-size:14px;}
+  .pw .dot{width:8px;height:8px;border-radius:50%;background:var(--good);display:inline-block;margin-right:6px}
+  .pw.host{border-color:var(--gold)}
+  .pw.ai{border-color:var(--accent)}
+  .pw .tag{font-size:11px;color:var(--gold);display:block;margin-top:6px;letter-spacing:1px}
+  .pw .tag.ai{color:var(--accent)}
 
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] }
-});
+  .board{flex:1;display:flex;flex-direction:column;gap:12px;padding:14px;overflow:hidden}
+  .statusbar{display:flex;align-items:center;gap:20px;padding:14px 22px;
+    background:linear-gradient(90deg,var(--panel-2),var(--panel));
+    border:1px solid var(--line);border-radius:14px;flex-wrap:wrap;}
+  .phase-badge{padding:6px 16px;border-radius:99px;font-size:13px;font-weight:700;letter-spacing:1px;
+    background:rgba(124,156,255,.15);color:var(--accent);border:1px solid rgba(124,156,255,.3);white-space:nowrap;}
+  .phase-badge.night{background:rgba(88,101,242,.15);color:#93a5ff;border-color:rgba(88,101,242,.4)}
+  .phase-badge.day{background:rgba(245,196,81,.15);color:var(--gold);border-color:rgba(245,196,81,.4)}
+  .sb-title{font-size:16px;font-weight:600;letter-spacing:1px}
+  .sb-sub{font-size:12px;color:var(--muted);margin-top:3px}
+  .timer{margin-left:auto;font-size:30px;font-weight:800;font-variant-numeric:tabular-nums;
+    color:var(--accent);min-width:64px;text-align:right}
+  .myrole{display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:10px;
+    background:var(--panel-2);border:1px solid var(--line);font-size:13px;}
+  .myrole .rname{font-weight:700;letter-spacing:1px}
+  .myrole.good .rname{color:var(--good)}
+  .myrole.wolf .rname{color:var(--wolf)}
+  .myrole.doctor .rname{color:var(--doctor)}
+  .myrole.sniper .rname{color:var(--sniper)}
 
-const rooms = new Map();
+  .main{flex:1;display:flex;gap:12px;min-height:0;flex-wrap:wrap}
+  .grid-wrap{flex:1;min-width:280px;overflow-y:auto}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px}
+  .pcard{position:relative;background:var(--panel);border:2px solid var(--line);border-radius:14px;
+    padding:14px 8px;text-align:center;transition:.18s;}
+  .pcard .avatar{width:46px;height:46px;border-radius:50%;margin:0 auto 8px;
+    display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700;
+    background:linear-gradient(135deg,#3b4a6b,#2a3345);color:#cfd8e8;}
+  .pcard .pname{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pcard .pmeta{font-size:10px;color:var(--muted);margin-top:4px;letter-spacing:.5px;min-height:13px}
+  .pcard.dead{opacity:.32;filter:grayscale(1)}
+  .pcard.dead::after{content:'☠';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    font-size:40px;color:#ff6b6b;opacity:.85;}
+  .pcard.me{border-color:var(--accent)}
+  .pcard.me .pname::after{content:' (你)';color:var(--accent);font-size:11px}
+  .pcard.selectable{cursor:pointer;border-color:rgba(245,196,81,.5)}
+  .pcard.selectable:hover{transform:translateY(-3px);border-color:var(--gold);box-shadow:0 8px 20px rgba(245,196,81,.15)}
+  .pcard.selected{border-color:var(--gold);background:rgba(245,196,81,.09)}
+  .pcard .votebadge{position:absolute;top:6px;right:6px;background:var(--gold);color:#241a00;
+    border-radius:99px;padding:1px 7px;font-size:11px;font-weight:800;}
+  .pcard .needlebadge{position:absolute;top:6px;right:6px;background:var(--doctor);color:#082f49;
+    border-radius:99px;padding:1px 7px;font-size:10px;font-weight:800;}
 
-const PHASE_SECONDS = {
-  NIGHT_WOLF: 30,
-  NIGHT_SEER: 20,
-  NIGHT_DOCTOR: 20,
-  NIGHT_SNIPER: 20,
-  DAY_ANNOUNCE: 10,
-  DAY_DISCUSS: 60,
-  DAY_VOTE: 30,
+  .sidebar{width:290px;display:flex;flex-direction:column;gap:12px;flex-shrink:0}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;display:flex;flex-direction:column}
+  .action-panel .title{font-size:14px;font-weight:700;margin-bottom:8px;color:var(--gold)}
+  .action-panel .desc{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:12px}
+  .action-panel .btns{display:flex;flex-direction:column;gap:8px}
+  .action-panel .btns .btn{padding:12px;font-size:14px}
+  .shoot-info{font-size:11.5px;color:var(--muted);background:var(--panel-2);border-radius:8px;padding:8px 10px;margin-bottom:10px;line-height:1.6;}
+
+  .chat{flex:1;min-height:200px}
+  .chat-tabs{display:flex;gap:6px;margin-bottom:10px}
+  .chat-tab{flex:1;padding:8px 4px;font-size:11px;border-radius:8px;background:var(--panel-2);
+    color:var(--muted);border:1px solid transparent;letter-spacing:.5px;}
+  .chat-tab.active{background:rgba(124,156,255,.15);color:var(--accent);border-color:rgba(124,156,255,.35)}
+  .chat-tab.wolf.active{background:rgba(239,68,68,.15);color:var(--wolf);border-color:rgba(239,68,68,.4)}
+  .chat-tab.evil.active{background:rgba(244,114,182,.15);color:var(--sniper);border-color:rgba(244,114,182,.4)}
+  .chat-msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12.5px;min-height:80px}
+  .msg{line-height:1.5;word-break:break-word}
+  .msg .who{font-weight:700;margin-right:6px;color:var(--accent)}
+  .msg.system{color:var(--muted);font-style:italic;font-size:11.5px}
+  .chat-input{display:flex;gap:6px;margin-top:10px}
+  .chat-input input{flex:1;padding:11px 12px;background:var(--panel-2);border:1px solid var(--line);
+    border-radius:9px;color:var(--text);font-size:15px;outline:none;}
+  .chat-input button{padding:0 16px;background:var(--accent);color:#fff;font-size:13px;font-weight:600}
+
+  .judge-bar{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);
+    background:linear-gradient(135deg,rgba(21,26,36,.97),rgba(28,34,48,.97));
+    border:1px solid var(--gold);border-radius:14px;padding:14px 28px;
+    font-size:15px;letter-spacing:1px;color:var(--gold);z-index:90;
+    box-shadow:0 12px 40px rgba(245,196,81,.18);
+    max-width:80vw;text-align:center;animation:slideUp .3s ease;}
+  @keyframes slideUp{from{opacity:0;transform:translate(-50%,14px)}}
+
+  ::-webkit-scrollbar{width:5px;height:5px}
+  ::-webkit-scrollbar-thumb{background:#2f3a4f;border-radius:99px}
+  ::-webkit-scrollbar-track{background:transparent}
+
+  @media(max-width:900px){
+    .main{flex-direction:column}
+    .sidebar{width:100%}
+  }
+  @media(max-width:768px){
+    body{overflow:auto;min-height:100vh}
+    #app{min-height:100vh;height:auto}
+    .lobby{padding:16px;align-items:flex-start;padding-top:40px}
+    .lobby-card{padding:28px 22px;border-radius:16px}
+    .lobby-card h1{font-size:22px}
+    .sub{font-size:11px;margin-bottom:22px}
+    .room{padding:12px}
+    .room-head{flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px;border-radius:12px}
+    .room-head > div:first-child{text-align:center}
+    .room-code b{font-size:20px;letter-spacing:4px}
+    .room-head > div:last-child{display:flex;justify-content:center;gap:8px;flex-wrap:wrap}
+    .room-head .btn{padding:9px 14px !important;font-size:13px !important}
+    .players-wait{grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px}
+    .pw{padding:12px 6px;font-size:12px;border-radius:10px}
+    .pw .tag{font-size:10px;margin-top:4px}
+    .board{padding:8px;gap:8px;overflow:visible;height:auto}
+    .statusbar{padding:10px 12px;gap:8px;border-radius:12px}
+    .phase-badge{padding:4px 10px;font-size:11px}
+    .sb-title{font-size:13px;letter-spacing:0}
+    .sb-sub{font-size:10.5px;line-height:1.4}
+    .timer{font-size:22px;min-width:40px}
+    .myrole{padding:5px 10px;font-size:11px}
+    .myrole .rname{font-size:12px}
+    .main{flex-direction:column;gap:10px;min-height:auto}
+    .grid-wrap{overflow:visible;min-width:0;width:100%}
+    .grid{grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px}
+    .pcard{padding:10px 5px;border-radius:12px}
+    .pcard .avatar{width:36px;height:36px;font-size:15px;margin-bottom:5px}
+    .pcard .pname{font-size:11.5px}
+    .pcard .pmeta{font-size:9.5px}
+    .pcard.dead::after{font-size:32px}
+    .pcard.me .pname::after{font-size:9px}
+    .sidebar{width:100%;gap:10px}
+    .panel{padding:12px;border-radius:12px}
+    .action-panel .title{font-size:13px}
+    .action-panel .desc{font-size:11.5px;line-height:1.5}
+    .action-panel .btns{gap:6px}
+    .action-panel .btns .btn{padding:13px;font-size:14px}
+    .chat{min-height:240px}
+    .chat-tabs{gap:5px;margin-bottom:8px}
+    .chat-tab{padding:8px 4px;font-size:11px}
+    .chat-msgs{min-height:100px;max-height:180px;font-size:12px}
+    .judge-bar{bottom:12px;padding:10px 18px;font-size:13px;max-width:92vw;border-radius:12px}
+  }
+  @media(max-width:400px){
+    .grid{grid-template-columns:repeat(auto-fill,minmax(76px,1fr));gap:6px}
+    .pcard{padding:8px 4px}
+    .pcard .avatar{width:32px;height:32px;font-size:14px}
+    .pcard .pname{font-size:11px}
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script>
+const SERVER_URL = 'https://werewolf-server-jmaa.onrender.com';
+const socket = io(SERVER_URL, { transports: ['websocket', 'polling'] });
+
+const ROLE_INFO = {
+  WEREWOLF: { name:'狼人',   camp:'wolf',   desc:'每晚與同伴共同商議刺殺一名玩家。', icon:'🐺' },
+  SNIPER:   { name:'狙擊手', camp:'sniper', desc:'邪惡方。每晚可狙擊1人（不能狙自己），子彈威力醫生無法救治。你可能誤殺狼人！', icon:'🎯' },
+  SEER:     { name:'警察',   camp:'good',   desc:'每晚可查驗一名玩家的陣營（好人 / 壞人）。', icon:'🔮' },
+  DOCTOR:   { name:'醫生',   camp:'doctor', desc:'每晚可對1人施針（包含自己）。若目標被狼人殺 → 救活；累計2次空針 → 目標死亡。', icon:'💉' },
+  VILLAGER: { name:'平民',   camp:'good',   desc:'沒有夜間技能，白天靠推理與投票找出邪惡方。', icon:'👤' },
 };
 
-// ============================================================
-// 工具函式
-// ============================================================
-function genRoomId(len) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let id = '';
-  do {
-    id = '';
-    for (let i = 0; i < len; i++) {
-      id += chars[Math.floor(Math.random() * chars.length)];
-    }
-  } while (rooms.has(id));
-  return id;
+let state = {
+  screen: 'lobby', roomId: null, myId: null, players: [], isHost: false,
+  phase: 'LOBBY', day: 0, myRole: null, phaseData: {}, selectedTarget: null,
+  myVote: null, chats: { PUBLIC: [], WOLF: [], EVIL: [], DEAD: [] },
+  chatTab: 'PUBLIC', gameOver: null, endsAt: null,
+  doctorShotsLeft: 0, sniperShotsLeft: 0,
+};
+
+const app = document.getElementById('app');
+
+function render(){
+  app.innerHTML = '';
+  if(state.screen === 'lobby')      app.appendChild(LobbyView());
+  else if(state.screen === 'room')  app.appendChild(RoomView());
+  else                              app.appendChild(BoardView());
+  if(state.gameOver) app.appendChild(GameOverModal());
 }
 
-function nameOf(room, id) {
-  const p = room.players.find(x => x.id === id);
-  return p ? p.name : '未知';
+function leaveRoom(){
+  socket.emit('leave_room');
+  state.screen = 'lobby'; state.roomId = null; state.players = [];
+  state.isHost = false; state.phase = 'LOBBY'; state.myRole = null;
+  state.gameOver = null; state.selectedTarget = null; state.myVote = null;
+  state.phaseData = {}; state.chats = { PUBLIC: [], WOLF: [], EVIL: [], DEAD: [] };
+  render();
 }
 
-function publicPlayers(room) {
-  return room.players.map(p => ({
-    id: p.id,
-    name: p.name,
-    alive: p.alive,
-    isHost: p.isHost,
-    isAI: !!p.isAI,
-  }));
-}
-
-function roomPayload(room) {
-  return { roomId: room.roomId, players: publicPlayers(room), phase: room.phase };
-}
-
-function broadcastPlayers(room) {
-  io.to(room.roomId).emit('players_updated', { players: publicPlayers(room) });
-}
-
-function emitRoomState(room) {
-  io.to(room.roomId).emit('room_updated', roomPayload(room));
-}
-
-function tallyVotes(room) {
-  const t = {};
-  Object.values(room.votes).forEach(v => { if (v) t[v] = (t[v] || 0) + 1; });
-  return t;
-}
-
-function topVoted(tally) {
-  let max = 0, top = null;
-  Object.keys(tally).forEach(id => {
-    if (tally[id] > max) { max = tally[id]; top = id; }
-  });
-  return top;
-}
-
-function systemMsg(room, text) {
-  io.to(room.roomId).emit('chat_message', {
-    channel: 'PUBLIC', system: true, text: text
-  });
-}
-
-// ============================================================
-// 角色分配（新表）
-// ============================================================
-function assignRoles(n) {
-  const table = {
-    6:  { WEREWOLF: 1, SEER: 1, VILLAGER: 4 },
-    7:  { WEREWOLF: 1, SEER: 1, VILLAGER: 5 },
-    8:  { WEREWOLF: 1, SEER: 1, VILLAGER: 6 },
-    9:  { WEREWOLF: 2, SEER: 2, VILLAGER: 5 },
-    10: { WEREWOLF: 2, SEER: 2, VILLAGER: 6 },
-    11: { WEREWOLF: 2, SEER: 2, VILLAGER: 7 },
-    12: { WEREWOLF: 3, SEER: 3, DOCTOR: 1, SNIPER: 1, VILLAGER: 4 },
-    13: { WEREWOLF: 3, SEER: 3, DOCTOR: 1, SNIPER: 1, VILLAGER: 5 },
-    14: { WEREWOLF: 3, SEER: 3, DOCTOR: 1, SNIPER: 1, VILLAGER: 6 },
-    15: { WEREWOLF: 4, SEER: 4, DOCTOR: 1, SNIPER: 1, VILLAGER: 5 },
-    16: { WEREWOLF: 4, SEER: 4, DOCTOR: 1, SNIPER: 1, VILLAGER: 6 },
-    17: { WEREWOLF: 4, SEER: 4, DOCTOR: 1, SNIPER: 1, VILLAGER: 7 },
-    18: { WEREWOLF: 4, SEER: 4, DOCTOR: 1, SNIPER: 1, VILLAGER: 8 },
+function LobbyView(){
+  const el = document.createElement('div');
+  el.className = 'lobby';
+  el.innerHTML = `
+    <div class="lobby-card">
+      <h1>狼 人 殺</h1>
+      <div class="sub">6–18 人 · 醫生 + 狙擊手</div>
+      <div class="field">
+        <label>你的暱稱</label>
+        <input id="nick" maxlength="12" placeholder="輸入暱稱…" autocomplete="off" />
+      </div>
+      <button class="btn" id="btn-create">建立房間</button>
+      <div class="field" style="margin-top:16px">
+        <label>房間邀請碼</label>
+        <input id="roomcode" maxlength="6" placeholder="6 碼房間號" style="text-transform:uppercase;letter-spacing:4px;text-align:center" autocomplete="off" />
+      </div>
+      <button class="btn ghost" id="btn-join">加入房間</button>
+      <div class="err" id="lobby-err"></div>
+      <div class="hint">💡 人不夠？進房後可新增 AI 玩家補位</div>
+    </div>
+  `;
+  const err = m => el.querySelector('#lobby-err').textContent = m;
+  el.querySelector('#btn-create').onclick = () => {
+    const nickname = el.querySelector('#nick').value.trim();
+    if(!nickname) return err('請輸入暱稱');
+    socket.emit('create_room', { nickname, roomIdLength: 6 }, res => {
+      if(!res?.ok) err(res?.error || '建立失敗');
+    });
   };
-  const cfg = table[n] || table[6];
-  const pool = [];
-  Object.keys(cfg).forEach(role => {
-    for (let i = 0; i < cfg[role]; i++) pool.push(role);
-  });
-  // Fisher-Yates 洗牌
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    const tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
-  }
-  return pool;
-}
-
-// 醫生針數 / 狙擊手子彈數
-function doctorShotsFor(n) { return n >= 15 ? 4 : 3; }
-function sniperShotsFor(n) { return n >= 15 ? 4 : 3; }
-
-// ============================================================
-// AI 邏輯
-// ============================================================
-const AI_NAMES = ['小狼', '阿智', '阿呆', '小紅', '阿明', '阿豪', '小玉', '大頭', '阿芬', '老張', '小陳', '阿傑', '阿宏', '小如', '阿文', '小婷', '阿伯', '小胖'];
-
-function genAiId(room) {
-  let i = 1;
-  while (room.players.find(p => p.id === 'ai_' + i)) i++;
-  return 'ai_' + i;
-}
-
-function aiWolfPick(room, ai) {
-  const targets = room.players.filter(p => p.alive && p.id !== ai.id && p.role !== 'WEREWOLF' && p.role !== 'SNIPER');
-  if (!targets.length) {
-    // 沒好人的話，連狙擊手也殺
-    const fallback = room.players.filter(p => p.alive && p.id !== ai.id);
-    return fallback.length ? fallback[Math.floor(Math.random() * fallback.length)].id : null;
-  }
-  const wolves = room.players.filter(p => p.role === 'WEREWOLF' && p.alive);
-  const otherVotes = wolves.filter(w => w.id !== ai.id && room.wolfVotes[w.id]).map(w => room.wolfVotes[w.id]);
-  if (otherVotes.length) return otherVotes[0];
-  const seer = targets.find(p => p.role === 'SEER');
-  if (seer && Math.random() < 0.6) return seer.id;
-  const doctor = targets.find(p => p.role === 'DOCTOR');
-  if (doctor && Math.random() < 0.5) return doctor.id;
-  return targets[Math.floor(Math.random() * targets.length)].id;
-}
-
-function aiSeerPick(room, ai) {
-  const checked = room.seerChecks[ai.id] || {};
-  const targets = room.players.filter(p => p.alive && p.id !== ai.id && !checked[p.id]);
-  if (!targets.length) return null;
-  return targets[Math.floor(Math.random() * targets.length)].id;
-}
-
-// 醫生：60% 救自己，40% 隨機救別人
-function aiDoctorPick(room, ai) {
-  if (Math.random() < 0.6 && ai.alive) return ai.id;
-  const targets = room.players.filter(p => p.alive);
-  if (!targets.length) return null;
-  return targets[Math.floor(Math.random() * targets.length)].id;
-}
-
-// 狙擊手：隨機選一個非自己的人（可能誤殺狼人）
-function aiSniperPick(room, ai) {
-  const targets = room.players.filter(p => p.alive && p.id !== ai.id);
-  if (!targets.length) return null;
-  return targets[Math.floor(Math.random() * targets.length)].id;
-}
-
-function aiVotePick(room, ai) {
-  const targets = room.players.filter(p => p.alive && p.id !== ai.id);
-  if (!targets.length) return null;
-
-  if (ai.role === 'SEER') {
-    const checked = room.seerChecks[ai.id] || {};
-    const knownWolf = targets.find(p => checked[p.id] === 'WOLF');
-    if (knownWolf) return knownWolf.id;
-  }
-
-  if (ai.role === 'WEREWOLF' || ai.role === 'SNIPER') {
-    const good = targets.filter(p => p.role !== 'WEREWOLF' && p.role !== 'SNIPER');
-    if (good.length) return good[Math.floor(Math.random() * good.length)].id;
-  }
-
-  const current = tallyVotes(room);
-  const top = topVoted(current);
-  if (top && targets.find(t => t.id === top)) return top;
-
-  return targets[Math.floor(Math.random() * targets.length)].id;
-}
-
-function aiSpeak(room, ai) {
-  const templates = {
-    WEREWOLF: ['我是平民，請相信我。', '昨晚我很安靜，因為我在觀察。', '我們先聽聽其他人的推理吧。', '我覺得預言家要小心，不要被騙。'],
-    SNIPER: ['我是平民。', '我懷疑昨晚發言最少的人。', '我們應該冷靜推理。'],
-    SEER: ['我是預言家，我查過人了。', '請大家相信我。', '我昨晚看到了一些東西。'],
-    DOCTOR: ['我是醫生，我救了人。', '請保護好預言家。', '我有一些發現。', '我建議大家先聽預言家發言。'],
-    VILLAGER: ['我是平民。', '我懷疑昨晚發言最少的人。', '我們應該冷靜推理。', '誰一直沒說話？這很可疑。', '我覺得狼人現在應該很緊張。'],
+  el.querySelector('#btn-join').onclick = () => {
+    const nickname = el.querySelector('#nick').value.trim();
+    const roomId = el.querySelector('#roomcode').value.trim().toUpperCase();
+    if(!nickname) return err('請輸入暱稱');
+    if(!roomId) return err('請輸入房間號');
+    socket.emit('join_room', { nickname, roomId }, res => {
+      if(!res?.ok) err(res?.error || '加入失敗');
+    });
   };
-  const pool = templates[ai.role] || templates.VILLAGER;
-  const text = pool[Math.floor(Math.random() * pool.length)];
-  io.to(room.roomId).emit('chat_message', { channel: 'PUBLIC', from: ai.name, text: text });
+  return el;
 }
 
-// 狼人統一邏輯
-function checkWolfUnified(room) {
-  const wolves = room.players.filter(p => p.role === 'WEREWOLF' && p.alive);
-  if (!wolves.length) return;
+function RoomView(){
+  const aiCount = state.players.filter(p => p.isAI).length;
+  const n = state.players.length;
+  const el = document.createElement('div');
+  el.className = 'room';
 
-  const votes = wolves.map(w => room.wolfVotes[w.id]);
-  const votedCount = votes.filter(v => v).length;
-
-  if (votedCount === wolves.length) {
-    const tally = {};
-    votes.forEach(v => { if (v) tally[v] = (tally[v] || 0) + 1; });
-    room.wolfTarget = topVoted(tally);
-    setPhase(room, 'NIGHT_SEER');
-  } else {
-    wolves.forEach(w => {
-      if (!w.isAI) io.to(w.id).emit('phase_changed', phasePayload(room, w, ''));
-    });
+  // 預覽配置
+  let compStr = '';
+  if(n >= 6){
+    if(n <= 8) compStr = '1 狼 + 1 警';
+    else if(n <= 11) compStr = '2 狼 + 2 警';
+    else if(n <= 14) compStr = '3 狼 + 3 警 + 1 醫(3針) + 1 狙(3彈)';
+    else compStr = '4 狼 + 4 警 + 1 醫(4針) + 1 狙(4彈)';
   }
+
+  el.innerHTML = `
+    <div class="room-head">
+      <div>
+        <div class="room-code">房間邀請碼<b>${state.roomId || ''}</b></div>
+      </div>
+      <div>
+        <span style="font-size:13px;color:var(--muted);align-self:center;margin-right:4px">${n} / 18 人</span>
+        <button class="btn ghost" id="btn-copy" style="width:auto;padding:9px 16px">複製邀請碼</button>
+        <button class="btn ghost" id="btn-leave" style="width:auto;padding:9px 16px">離開</button>
+      </div>
+    </div>
+    ${compStr ? `<div style="background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 18px;margin-bottom:16px;font-size:13px;color:var(--muted)">
+      📋 目前配置：<b style="color:var(--gold)">${compStr}</b>（其餘平民）
+    </div>` : ''}
+    <div class="players-wait">
+      ${state.players.map(p => `
+        <div class="pw ${p.isHost?'host':''} ${p.isAI?'ai':''}">
+          <div><span class="dot"></span>${p.name}</div>
+          ${p.isHost?'<span class="tag">房主</span>':''}
+          ${p.isAI?'<span class="tag ai">🤖 AI</span>':''}
+        </div>
+      `).join('')}
+    </div>
+    <div style="margin-top:28px;max-width:420px">
+      ${state.isHost ? `
+        <div style="display:flex;gap:8px;margin-bottom:12px">
+          <button class="btn ghost" id="btn-add-ai" ${n>=18?'disabled':''}>＋ 新增 AI 玩家</button>
+          ${aiCount > 0 ? `<button class="btn ghost" id="btn-remove-ai" style="flex:0 0 auto;width:auto;padding:13px 18px">移除 AI</button>` : ''}
+        </div>
+        <button class="btn gold" id="btn-start" ${n<6?'disabled':''}>
+          開始遊戲 ${n<6?`（還需 ${6-n} 人）`:''}
+        </button>
+      ` : `<div class="hint">等待房主開始遊戲…</div>`}
+    </div>
+  `;
+
+  el.querySelector('#btn-copy')?.addEventListener('click', () => {
+    navigator.clipboard?.writeText(state.roomId);
+    alert('邀請碼已複製：' + state.roomId);
+  });
+  el.querySelector('#btn-leave')?.addEventListener('click', () => {
+    if(!confirm('確定要離開房間嗎？')) return;
+    leaveRoom();
+  });
+  el.querySelector('#btn-add-ai')?.addEventListener('click', () => {
+    socket.emit('add_ai_player', {}, res => { if(!res?.ok) alert(res?.error || '新增 AI 失敗'); });
+  });
+  el.querySelector('#btn-remove-ai')?.addEventListener('click', () => {
+    const aiPlayers = state.players.filter(p => p.isAI);
+    if(!aiPlayers.length) return;
+    socket.emit('remove_ai_player', { playerId: aiPlayers[aiPlayers.length - 1].id }, res => {
+      if(!res?.ok) alert(res?.error || '移除 AI 失敗');
+    });
+  });
+  el.querySelector('#btn-start')?.addEventListener('click', () => {
+    socket.emit('start_game', {}, res => { if(!res?.ok) alert(res?.error || '無法開始'); });
+  });
+  return el;
 }
 
-// 排程 AI 行動
-function scheduleAiActions(room, phase) {
-  const ais = room.players.filter(p => p.isAI && p.alive);
+function BoardView(){
+  const me = state.players.find(p => p.id === state.myId);
+  const isNight = state.phase.startsWith('NIGHT');
+  const roleInfo = state.myRole ? ROLE_INFO[state.myRole] : null;
 
-  if (phase === 'DAY_DISCUSS') {
-    ais.forEach((ai, idx) => {
-      setTimeout(() => {
-        if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
-        aiSpeak(room, ai);
-      }, 3000 + idx * 3000 + Math.random() * 3000);
-    });
-  }
+  const el = document.createElement('div');
+  el.className = 'board';
+  el.innerHTML = `
+    <div class="statusbar">
+      <div class="phase-badge ${isNight?'night':'day'}">${phaseLabel(state.phase)}</div>
+      <div style="flex:1;min-width:0">
+        <div class="sb-title">${phaseTitle(state.phase)}</div>
+        <div class="sb-sub">${phaseSub(state.phase)}</div>
+      </div>
+      ${roleInfo ? `<div class="myrole ${roleInfo.camp}">
+        <span style="color:var(--muted);font-size:10px">身分</span>
+        <span class="rname">${roleInfo.icon} ${roleInfo.name}</span>
+      </div>` : ''}
+      <div class="timer" id="timer">--</div>
+      <button class="btn ghost" id="btn-exit-game" style="width:auto;padding:8px 12px;font-size:12px">離開</button>
+    </div>
 
-  if (phase === 'NIGHT_WOLF') {
-    ais.filter(p => p.role === 'WEREWOLF').forEach((ai, idx) => {
-      setTimeout(() => {
-        if (room.phase !== 'NIGHT_WOLF' || !ai.alive) return;
-        const target = aiWolfPick(room, ai);
-        if (!target) return;
-        room.wolfVotes[ai.id] = target;
-        checkWolfUnified(room);
-      }, 2500 + idx * 3000 + Math.random() * 3000);
-    });
-  }
+    <div class="main">
+      <div class="grid-wrap">
+        <div class="grid">
+          ${state.players.map(p => playerCard(p)).join('')}
+        </div>
+      </div>
 
-  if (phase === 'NIGHT_SEER') {
-    ais.filter(p => p.role === 'SEER').forEach(ai => {
-      setTimeout(() => {
-        if (room.phase !== 'NIGHT_SEER' || !ai.alive) return;
-        const target = aiSeerPick(room, ai);
-        if (!target) return;
-        if (!room.seerChecks[ai.id]) room.seerChecks[ai.id] = {};
-        const t = room.players.find(p => p.id === target);
-        room.seerChecks[ai.id][target] = t.role === 'WEREWOLF' || t.role === 'SNIPER' ? 'WOLF' : 'GOOD';
-      }, 2000 + Math.random() * 4000);
-    });
-  }
+      <div class="sidebar">
+        <div class="panel action-panel">${ActionPanelHTML()}</div>
+        <div class="panel chat">
+          <div class="chat-tabs">
+            <button class="chat-tab ${state.chatTab==='PUBLIC'?'active':''}" data-tab="PUBLIC">🌐 公開</button>
+            ${state.myRole==='WEREWOLF' ? `<button class="chat-tab wolf ${state.chatTab==='WOLF'?'active':''}" data-tab="WOLF">🐺 狼隊</button>`:''}
+            ${(state.myRole==='SNIPER') ? `<button class="chat-tab evil ${state.chatTab==='EVIL'?'active':''}" data-tab="EVIL">🎯 邪惡</button>`:''}
+            ${!me?.alive ? `<button class="chat-tab ${state.chatTab==='DEAD'?'active':''}" data-tab="DEAD">💀 亡者</button>`:''}
+          </div>
+          <div class="chat-msgs">
+            ${(state.chats[state.chatTab] || []).map(chatMsgHTML).join('')}
+          </div>
+          <div class="chat-input">
+            <input id="chat-in" placeholder="輸入訊息…" maxlength="120" autocomplete="off" />
+            <button id="chat-send">送出</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
 
-  if (phase === 'NIGHT_DOCTOR') {
-    ais.filter(p => p.role === 'DOCTOR').forEach(ai => {
-      setTimeout(() => {
-        if (room.phase !== 'NIGHT_DOCTOR' || !ai.alive) return;
-        const target = aiDoctorPick(room, ai);
-        if (!target) return;
-        room.doctorTarget = target;
-        // AI 行動後自動推進
-        setTimeout(() => {
-          if (room.phase === 'NIGHT_DOCTOR') nextAfterDoctor(room);
-        }, 1500);
-      }, 2500 + Math.random() * 3000);
-    });
-  }
+  el.querySelector('.grid').addEventListener('click', e => {
+    const card = e.target.closest('.pcard.selectable');
+    if(!card) return;
+    const pid = card.dataset.pid;
+    state.selectedTarget = (state.selectedTarget === pid) ? null : pid;
+    render();
+  });
 
-  if (phase === 'NIGHT_SNIPER') {
-    ais.filter(p => p.role === 'SNIPER').forEach(ai => {
-      setTimeout(() => {
-        if (room.phase !== 'NIGHT_SNIPER' || !ai.alive) return;
-        const target = aiSniperPick(room, ai);
-        if (!target) return;
-        room.sniperTarget = target;
-        setTimeout(() => {
-          if (room.phase === 'NIGHT_SNIPER') resolveNight(room);
-        }, 1500);
-      }, 2500 + Math.random() * 3000);
-    });
-  }
+  el.querySelectorAll('.chat-tab').forEach(t => {
+    t.onclick = () => { state.chatTab = t.dataset.tab; render(); };
+  });
 
-  if (phase === 'DAY_VOTE') {
-    ais.forEach((ai, idx) => {
-      setTimeout(() => {
-        if (room.phase !== 'DAY_VOTE' || !ai.alive) return;
-        if (room.votes[ai.id] !== undefined) return;
-        const target = aiVotePick(room, ai);
-        room.votes[ai.id] = target;
-        io.to(room.roomId).emit('vote_updated', { votes: tallyVotes(room) });
-        const aliveCount = room.players.filter(p => p.alive).length;
-        if (Object.keys(room.votes).length >= aliveCount) {
-          clearTimeout(room.timer);
-          setTimeout(() => resolveVote(room), 800);
-        }
-      }, 3000 + idx * 2500 + Math.random() * 3000);
-    });
-  }
-}
-
-// ============================================================
-// 法官台詞
-// ============================================================
-function judgeSpeech(room, phase) {
-  const d = room.day;
-  switch (phase) {
-    case 'NIGHT_WOLF':   return '天黑請閉眼。第 ' + d + ' 夜，狼人請睜眼，請選擇今晚要刺殺的對象。';
-    case 'NIGHT_SEER':   return '狼人請閉眼。警察請睜眼，請選擇一名玩家查驗身分。';
-    case 'NIGHT_DOCTOR': return '警察請閉眼。醫生請睜眼，請選擇一名玩家施針。';
-    case 'NIGHT_SNIPER': return '醫生請閉眼。狙擊手請睜眼，請選擇你的目標。';
-    case 'DAY_ANNOUNCE': {
-      if (!room.pendingDeaths.length) return '天亮了。第 ' + d + ' 天，昨晚是平安夜。';
-      return '天亮了。昨晚，' + room.pendingDeaths.map(x => x.name).join('、') + ' 倒牌了。';
-    }
-    case 'DAY_DISCUSS': return '現在進入白天討論，請所有玩家依序發言。';
-    case 'DAY_VOTE':    return '發言結束，請所有玩家投票，選出你要放逐的對象。';
-    case 'GAME_OVER':   return '遊戲結束。';
-    default:            return '';
-  }
-}
-
-// ============================================================
-// 階段切換
-// ============================================================
-function phasePayload(room, player, speechText) {
-  const data = { selectableIds: [] };
-  const aliveOthers = room.players.filter(p => p.alive && p.id !== player.id).map(p => p.id);
-
-  if (room.phase === 'NIGHT_WOLF' && player.role === 'WEREWOLF' && player.alive) {
-    data.selectableIds = aliveOthers;
-    data.wolfPartners = room.players
-      .filter(p => p.role === 'WEREWOLF' && p.id !== player.id)
-      .map(p => ({ id: p.id, name: p.name }));
-  }
-
-  if (room.phase === 'NIGHT_SEER' && player.role === 'SEER' && player.alive) {
-    data.selectableIds = aliveOthers;
-    data.checks = room.seerChecks[player.id] || {};
-  }
-
-  if (room.phase === 'NIGHT_DOCTOR' && player.role === 'DOCTOR' && player.alive) {
-    // 醫生可以對自己施針 → 可選包含自己
-    data.selectableIds = room.players.filter(p => p.alive).map(p => p.id);
-    data.shotsLeft = room.doctorShotsLeft;
-    data.emptyCounts = room.emptyShotCount;
-  }
-
-  if (room.phase === 'NIGHT_SNIPER' && player.role === 'SNIPER' && player.alive) {
-    data.selectableIds = aliveOthers;
-    data.shotsLeft = room.sniperShotsLeft;
-  }
-
-  if (room.phase === 'DAY_VOTE' && player.alive) {
-    data.selectableIds = aliveOthers;
-  }
-
-  if (room.phase === 'DAY_ANNOUNCE') {
-    data.deaths = room.pendingDeaths;
-  }
-
-  return {
-    phase: room.phase,
-    day: room.day,
-    endsAt: room.endsAt,
-    data: data,
-    votes: tallyVotes(room),
-    speech: { text: speechText || '' },
+  const chatIn = el.querySelector('#chat-in');
+  const sendChat = () => {
+    const text = chatIn.value.trim();
+    if(!text) return;
+    socket.emit('chat_send', { channel: state.chatTab, text });
+    chatIn.value = '';
   };
-}
+  el.querySelector('#chat-send').onclick = sendChat;
+  chatIn.addEventListener('keydown', e => { if(e.key === 'Enter') sendChat(); });
 
-function setPhase(room, phase) {
-  // 自動跳過沒有醫生/狙擊手的階段
-  if (phase === 'NIGHT_DOCTOR') {
-    const hasDoctor = room.players.some(p => p.role === 'DOCTOR' && p.alive);
-    if (!hasDoctor || room.doctorShotsLeft <= 0) return setPhase(room, 'NIGHT_SNIPER');
-  }
-  if (phase === 'NIGHT_SNIPER') {
-    const hasSniper = room.players.some(p => p.role === 'SNIPER' && p.alive);
-    if (!hasSniper || room.sniperShotsLeft <= 0) return resolveNight(room);
-  }
-
-  clearTimeout(room.timer);
-  room.phase = phase;
-
-  const sec = PHASE_SECONDS[phase] || 20;
-  room.endsAt = Date.now() + sec * 1000;
-
-  if (phase === 'DAY_VOTE') room.votes = {};
-
-  const speech = judgeSpeech(room, phase);
-  room.players.forEach(p => {
-    if (p.isAI) return;
-    io.to(p.id).emit('phase_changed', phasePayload(room, p, speech));
+  el.querySelector('#btn-exit-game')?.addEventListener('click', () => {
+    if(!confirm('確定要離開遊戲嗎？')) return;
+    leaveRoom();
   });
 
-  scheduleAiActions(room, phase);
-
-  room.timer = setTimeout(() => onPhaseTimeout(room, phase), sec * 1000 + 500);
+  bindActionButtons(el);
+  startTimer(el.querySelector('#timer'));
+  return el;
 }
 
-function onPhaseTimeout(room, phase) {
-  if (room.phase !== phase) return;
+function phaseLabel(p){
+  const m = { LOBBY:'等待中', NIGHT_WOLF:'夜晚', NIGHT_SEER:'夜晚', NIGHT_DOCTOR:'夜晚', NIGHT_SNIPER:'夜晚',
+    DAY_ANNOUNCE:'白天', DAY_DISCUSS:'白天', DAY_VOTE:'投票', GAME_OVER:'結算' };
+  return m[p] || p;
+}
+function phaseTitle(p){
+  const m = {
+    LOBBY:'等待房主開始',
+    NIGHT_WOLF:`第 ${state.day} 夜 · 狼人請睜眼`,
+    NIGHT_SEER:`第 ${state.day} 夜 · 警察請睜眼`,
+    NIGHT_DOCTOR:`第 ${state.day} 夜 · 醫生請睜眼`,
+    NIGHT_SNIPER:`第 ${state.day} 夜 · 狙擊手請睜眼`,
+    DAY_ANNOUNCE:`第 ${state.day} 天 · 天亮了`,
+    DAY_DISCUSS:`第 ${state.day} 天 · 輪流發言`,
+    DAY_VOTE:`第 ${state.day} 天 · 投票放逐`,
+    GAME_OVER:'遊戲結束',
+  };
+  return m[p] || p;
+}
+function phaseSub(p){
+  const m = {
+    NIGHT_WOLF:'狼人之間可討論，選定今晚的目標',
+    NIGHT_SEER:'選擇一名玩家查驗陣營',
+    NIGHT_DOCTOR:'選擇一名玩家施針（可選自己）',
+    NIGHT_SNIPER:'選擇一名玩家狙擊（不能選自己）',
+    DAY_ANNOUNCE:'昨晚有人倒牌…',
+    DAY_DISCUSS:'依序發言，找出潛藏的邪惡方',
+    DAY_VOTE:'點擊玩家頭像投票，最高票者出局',
+    GAME_OVER:'本局已結束',
+  };
+  return m[p] || '';
+}
 
-  if (phase === 'NIGHT_WOLF') {
-    if (!room.wolfTarget) {
-      const tally = {};
-      Object.values(room.wolfVotes).forEach(v => { if (v) tally[v] = (tally[v] || 0) + 1; });
-      room.wolfTarget = topVoted(tally);
-      if (room.wolfTarget) systemMsg(room, '狼人未達成共識，隨機選定了目標。');
+function playerCard(p){
+  const isSelectable = state.phaseData?.selectableIds?.includes(p.id);
+  const isSelected = state.selectedTarget === p.id;
+  const isMe = p.id === state.myId;
+  const voteCount = state.phaseData?.votes?.[p.id] || 0;
+  const checkMark = state.phaseData?.checks?.[p.id];
+  const emptyCount = state.phaseData?.emptyCounts?.[p.id] || 0;
+
+  return `
+    <div class="pcard ${p.alive?'':'dead'} ${isMe?'me':''} ${isSelectable?'selectable':''} ${isSelected?'selected':''}"
+         data-pid="${p.id}">
+      ${voteCount ? `<span class="votebadge">${voteCount}</span>` : ''}
+      ${emptyCount ? `<span class="needlebadge">💉${emptyCount}</span>` : ''}
+      ${checkMark ? `<span class="votebadge" style="right:auto;left:6px;background:${checkMark==='WOLF'?'var(--wolf)':'var(--good)'}">${checkMark==='WOLF'?'🐺':'✅'}</span>` : ''}
+      <div class="avatar">${p.isAI?'🤖':p.name.slice(0,1).toUpperCase()}</div>
+      <div class="pname">${p.name}</div>
+      <div class="pmeta">${!p.alive ? '已出局' : p.isHost ? '房主' : p.isAI ? '🤖 AI' : ''}</div>
+    </div>
+  `;
+}
+
+function ActionPanelHTML(){
+  const d = state.phaseData || {};
+  const me = state.players.find(p => p.id === state.myId);
+  if(state.phase === 'GAME_OVER') return `<div class="desc">遊戲已結束</div>`;
+  if(!me?.alive) return `<div class="desc">💀 你已出局<br/>可繼續在亡者頻道觀戰</div>`;
+
+  switch(state.phase){
+    case 'NIGHT_WOLF': {
+      if(state.myRole !== 'WEREWOLF') return `<div class="desc">🌙 天黑請閉眼…</div>`;
+      const partner = (d.wolfPartners || []).map(p => p.name).join('、');
+      return `
+        <div class="title">🐺 狼人行動</div>
+        <div class="desc">同伴：${partner || '（無）'}<br/>點擊玩家頭像選擇刺殺目標。</div>
+        <div class="btns">
+          <button class="btn wolf" data-action="wolf_confirm" ${state.selectedTarget?'':'disabled'}>
+            ${state.selectedTarget ? '確認刺殺 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
+          </button>
+        </div>`;
     }
-    return setPhase(room, 'NIGHT_SEER');
+    case 'NIGHT_SEER': {
+      if(state.myRole !== 'SEER') return `<div class="desc">🌙 天黑請閉眼…</div>`;
+      const checks = d.checks || {};
+      const checkedList = Object.entries(checks).map(([id,c]) => `${nameOf(id)}：${c==='WOLF'?'🐺 壞人':'✅ 好人'}`).join('<br/>');
+      return `
+        <div class="title">🔮 警察查驗</div>
+        <div class="desc">點擊玩家頭像查驗陣營。</div>
+        ${checkedList ? `<div class="desc" style="border-top:1px solid var(--line);padding-top:8px">${checkedList}</div>` : ''}
+        <div class="btns">
+          <button class="btn good" data-action="seer_confirm" ${state.selectedTarget?'':'disabled'}>
+            ${state.selectedTarget ? '查驗 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
+          </button>
+        </div>`;
+    }
+    case 'NIGHT_DOCTOR': {
+      if(state.myRole !== 'DOCTOR') return `<div class="desc">🌙 天黑請閉眼…</div>`;
+      const shots = d.shotsLeft ?? 0;
+      const empties = d.emptyCounts || {};
+      const emptyList = Object.entries(empties)
+        .filter(([id, c]) => c > 0 && state.players.find(p => p.id === id && p.alive))
+        .map(([id, c]) => `${nameOf(id)}：${c}/2 空針`).join('<br/>');
+      return `
+        <div class="title">💉 醫生施針</div>
+        <div class="shoot-info">剩餘針數：<b style="color:var(--doctor)">${shots}</b></div>
+        <div class="desc">點擊玩家頭像選擇施針對象（可選自己）。<br/>對象被狼人殺 → 救活；累計 2 次空針 → 目標死亡。</div>
+        ${emptyList ? `<div class="shoot-info">📋 空針紀錄：<br/>${emptyList}</div>` : ''}
+        <div class="btns">
+          <button class="btn doctor" data-action="doctor_heal" ${state.selectedTarget?'':'disabled'}>
+            ${state.selectedTarget ? '施針給 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
+          </button>
+          <button class="btn ghost" data-action="doctor_skip">不使用針</button>
+        </div>`;
+    }
+    case 'NIGHT_SNIPER': {
+      if(state.myRole !== 'SNIPER') return `<div class="desc">🌙 天黑請閉眼…</div>`;
+      const shots = d.shotsLeft ?? 0;
+      return `
+        <div class="title">🎯 狙擊手開槍</div>
+        <div class="shoot-info">剩餘子彈：<b style="color:var(--sniper)">${shots}</b></div>
+        <div class="desc">點擊玩家頭像選擇狙擊目標（不能選自己）。<br/>⚠️ 子彈威力醫生無法救治，且你可能誤殺狼人！</div>
+        <div class="btns">
+          <button class="btn sniper" data-action="sniper_shoot" ${state.selectedTarget?'':'disabled'}>
+            ${state.selectedTarget ? '狙擊 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
+          </button>
+          <button class="btn ghost" data-action="sniper_skip">不開槍</button>
+        </div>`;
+    }
+    case 'DAY_VOTE': {
+      if(state.myVote) return `<div class="desc">✅ 你已投票給 <b>${nameOf(state.myVote)}</b><br/>等待其他玩家…</div>`;
+      return `
+        <div class="title">🗳 投票放逐</div>
+        <div class="desc">點擊玩家頭像投票，最高票者將被放逐。</div>
+        <div class="btns">
+          <button class="btn gold" data-action="vote_confirm" ${state.selectedTarget?'':'disabled'}>
+            ${state.selectedTarget ? '投票給 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
+          </button>
+          <button class="btn ghost" data-action="vote_skip">棄票</button>
+        </div>`;
+    }
+    case 'DAY_DISCUSS':
+      return `<div class="title">💬 發言階段</div><div class="desc">輪流發言，找出潛藏的邪惡方。</div>`;
+    default:
+      return `<div class="desc">等待中…</div>`;
   }
-  if (phase === 'NIGHT_SEER')   return nextAfterSeer(room);
-  if (phase === 'NIGHT_DOCTOR') return nextAfterDoctor(room);
-  if (phase === 'NIGHT_SNIPER') return resolveNight(room);
-  if (phase === 'DAY_ANNOUNCE') return afterAnnounce(room);
-  if (phase === 'DAY_DISCUSS')  return setPhase(room, 'DAY_VOTE');
-  if (phase === 'DAY_VOTE')     return resolveVote(room);
 }
 
-function nextAfterSeer(room) {
-  const hasDoctor = room.players.some(p => p.role === 'DOCTOR' && p.alive);
-  if (hasDoctor && room.doctorShotsLeft > 0) {
-    setPhase(room, 'NIGHT_DOCTOR');
-  } else {
-    nextAfterDoctor(room);
-  }
+function nameOf(id){
+  return state.players.find(p => p.id === id)?.name || '未知';
 }
 
-function nextAfterDoctor(room) {
-  const hasSniper = room.players.some(p => p.role === 'SNIPER' && p.alive);
-  if (hasSniper && room.sniperShotsLeft > 0) {
-    setPhase(room, 'NIGHT_SNIPER');
-  } else {
-    resolveNight(room);
-  }
+function chatMsgHTML(m){
+  if(m.system) return `<div class="msg system">${m.text}</div>`;
+  const cls = m.channel === 'WOLF' ? 'wolf' : m.channel === 'DEAD' ? 'dead' : m.channel === 'EVIL' ? 'evil' : '';
+  return `<div class="msg ${cls}"><span class="who">${m.from}：</span>${m.text}</div>`;
 }
 
-// ============================================================
-// 遊戲流程
-// ============================================================
-function startGame(room) {
-  const n = room.players.length;
-  const roles = assignRoles(n);
-  room.players.forEach((p, i) => {
-    p.alive = true;
-    p.role = roles[i];
-    p.deathCause = null;
-  });
-
-  room.day = 0;
-  room.seerChecks = {};
-  room.wolfVotes = {};
-  room.wolfTarget = null;
-  room.votes = {};
-  room.pendingDeaths = [];
-  room.doctorTarget = null;
-  room.sniperTarget = null;
-  room.doctorShotsLeft = doctorShotsFor(n);
-  room.sniperShotsLeft = sniperShotsFor(n);
-  room.emptyShotCount = {};
-
-  room.players.forEach(p => {
-    if (p.isAI) return;
-    io.to(p.id).emit('game_started', {
-      myRole: p.role,
-      players: publicPlayers(room),
-      day: 0,
-      doctorShots: room.doctorShotsLeft,
-      sniperShots: room.sniperShotsLeft,
-    });
-  });
-
-  setTimeout(() => beginNight(room), 3500);
-}
-
-function beginNight(room) {
-  room.day += 1;
-  room.wolfVotes = {};
-  room.wolfTarget = null;
-  room.pendingDeaths = [];
-  room.doctorTarget = null;
-  room.sniperTarget = null;
-  setPhase(room, 'NIGHT_WOLF');
-}
-
-function resolveNight(room) {
-  const deaths = [];
-  const wolfTarget = room.wolfTarget;
-  const sniperTarget = room.sniperTarget;
-  const doctorTarget = room.doctorTarget;
-
-  // 1. 狼人殺
-  if (wolfTarget) {
-    if (doctorTarget === wolfTarget) {
-      // 醫生救了狼人的目標
-      systemMsg(room, '💉 醫生施針成功，' + nameOf(room, wolfTarget) + ' 被救活了！');
-    } else {
-      const p = room.players.find(x => x.id === wolfTarget);
-      if (p && p.alive) {
-        p.alive = false;
-        p.deathCause = 'WOLF';
-        deaths.push({ id: p.id, name: p.name, cause: 'WOLF' });
+function bindActionButtons(root){
+  root.querySelectorAll('[data-action]').forEach(btn => {
+    btn.onclick = () => {
+      const a = btn.dataset.action;
+      const t = state.selectedTarget;
+      switch(a){
+        case 'wolf_confirm':   socket.emit('wolf_kill',    { targetId: t }); break;
+        case 'seer_confirm':   socket.emit('seer_check',   { targetId: t }); break;
+        case 'doctor_heal':    socket.emit('doctor_heal',  { targetId: t }); break;
+        case 'doctor_skip':    socket.emit('doctor_skip'); break;
+        case 'sniper_shoot':   socket.emit('sniper_shoot', { targetId: t }); break;
+        case 'sniper_skip':    socket.emit('sniper_skip'); break;
+        case 'vote_confirm':   state.myVote = t; socket.emit('day_vote', { targetId: t }); break;
+        case 'vote_skip':      state.myVote = null; socket.emit('day_vote', { targetId: null }); break;
       }
-    }
-  }
-
-  // 2. 狙擊手（無視醫生）
-  if (sniperTarget) {
-    const p = room.players.find(x => x.id === sniperTarget);
-    if (p && p.alive) {
-      p.alive = false;
-      p.deathCause = 'SNIPER';
-      deaths.push({ id: p.id, name: p.name, cause: 'SNIPER' });
-    }
-  }
-
-  // 3. 醫生施針
-  if (doctorTarget && room.doctorShotsLeft > 0) {
-    room.doctorShotsLeft -= 1;
-
-    const savedWolf = (doctorTarget === wolfTarget && wolfTarget);
-    const targetKilledBySniper = (doctorTarget === sniperTarget && sniperTarget);
-
-    if (!savedWolf && !targetKilledBySniper) {
-      // 空針
-      room.emptyShotCount[doctorTarget] = (room.emptyShotCount[doctorTarget] || 0) + 1;
-      if (room.emptyShotCount[doctorTarget] >= 2) {
-        const p = room.players.find(x => x.id === doctorTarget);
-        if (p && p.alive) {
-          p.alive = false;
-          p.deathCause = 'DOCTOR';
-          deaths.push({ id: p.id, name: p.name, cause: 'DOCTOR' });
-        }
-      }
-    }
-  }
-
-  room.pendingDeaths = deaths;
-  room.wolfTarget = null;
-  room.sniperTarget = null;
-  room.doctorTarget = null;
-
-  broadcastPlayers(room);
-  if (checkWin(room)) return;
-  setPhase(room, 'DAY_ANNOUNCE');
-}
-
-function afterAnnounce(room) {
-  setPhase(room, 'DAY_DISCUSS');
-}
-
-function resolveVote(room) {
-  if (room.phase !== 'DAY_VOTE') return;
-
-  const t = tallyVotes(room);
-  let max = 0, top = [];
-  Object.keys(t).forEach(id => {
-    if (t[id] > max) { max = t[id]; top = [id]; }
-    else if (t[id] === max) top.push(id);
-  });
-
-  if (top.length !== 1 || max === 0) {
-    systemMsg(room, '平票或全體棄票，本輪無人出局。');
-    return beginNight(room);
-  }
-
-  const outId = top[0];
-  const p = room.players.find(x => x.id === outId);
-  if (p && p.alive) {
-    p.alive = false;
-    p.deathCause = 'VOTE';
-    broadcastPlayers(room);
-    systemMsg(room, p.name + ' 被投票放逐出局。');
-  }
-
-  if (checkWin(room)) return;
-  beginNight(room);
-}
-
-// ============================================================
-// 勝負判定（邪惡方 = 狼人 + 狙擊手）
-// ============================================================
-function checkWin(room) {
-  if (room.phase === 'GAME_OVER') return true;
-
-  const alive = room.players.filter(p => p.alive);
-  const evils = alive.filter(p => p.role === 'WEREWOLF' || p.role === 'SNIPER');
-  const villagers = alive.filter(p => p.role === 'VILLAGER');
-  const gods = alive.filter(p => p.role === 'SEER' || p.role === 'DOCTOR');
-
-  let winner = null, reason = '';
-
-  if (evils.length === 0) {
-    winner = 'GOOD'; reason = '所有邪惡方已出局，正義陣營勝利！';
-  } else if (villagers.length === 0) {
-    winner = 'WOLF'; reason = '所有平民出局（屠民），邪惡陣營勝利！';
-  } else if (gods.length === 0) {
-    winner = 'WOLF'; reason = '所有神職出局（屠神），邪惡陣營勝利！';
-  } else if (evils.length >= alive.length - evils.length) {
-    winner = 'WOLF'; reason = '邪惡方數量已不低於正義方，邪惡陣營勝利！';
-  }
-
-  if (winner) {
-    clearTimeout(room.timer);
-    room.phase = 'GAME_OVER';
-    io.to(room.roomId).emit('game_over', {
-      winner: winner,
-      reason: reason,
-      players: room.players.map(p => ({
-        id: p.id, name: p.name, alive: p.alive, isHost: p.isHost,
-        isAI: !!p.isAI, role: p.role,
-      })),
-    });
-    return true;
-  }
-  return false;
-}
-
-// ============================================================
-// 離房處理
-// ============================================================
-function handleLeave(socket) {
-  const roomId = socket.data.roomId;
-  if (!roomId) return;
-  const room = rooms.get(roomId);
-  if (!room) return;
-
-  const idx = room.players.findIndex(p => p.id === socket.id);
-  if (idx === -1) return;
-
-  const removed = room.players[idx];
-  room.players.splice(idx, 1);
-  socket.leave(roomId);
-  socket.data.roomId = null;
-
-  const inGame = room.phase !== 'LOBBY' && room.phase !== 'GAME_OVER';
-  if (inGame) {
-    removed.alive = false;
-    broadcastPlayers(room);
-    systemMsg(room, removed.name + ' 已離線。');
-    if (checkWin(room)) return;
-  }
-
-  if (room.players.length === 0) {
-    clearTimeout(room.timer);
-    rooms.delete(roomId);
-    return;
-  }
-
-  if (room.hostId === removed.id) {
-    const nextHost = room.players.find(p => !p.isAI);
-    if (nextHost) {
-      room.hostId = nextHost.id;
-      room.players.forEach(p => p.isHost = false);
-      nextHost.isHost = true;
-    } else {
-      room.hostId = room.players[0].id;
-      room.players[0].isHost = true;
-    }
-  }
-  emitRoomState(room);
-}
-
-// ============================================================
-// Socket 事件
-// ============================================================
-io.on('connection', socket => {
-  console.log('[+] connected:', socket.id);
-
-  socket.on('create_room', (payload, cb) => {
-    const nickname = String((payload && payload.nickname) || '').trim().slice(0, 12);
-    const len = (payload && payload.roomIdLength === 4) ? 4 : 6;
-    if (!nickname) return cb && cb({ ok: false, error: '暱稱不可為空' });
-
-    const roomId = genRoomId(len);
-    const room = {
-      roomId, hostId: socket.id, phase: 'LOBBY', day: 0, players: [],
-      wolfVotes: {}, wolfTarget: null, seerChecks: {}, votes: {}, pendingDeaths: [],
-      doctorTarget: null, sniperTarget: null, doctorShotsLeft: 0, sniperShotsLeft: 0,
-      emptyShotCount: {}, timer: null, endsAt: null,
+      state.selectedTarget = null;
     };
-    room.players.push({ id: socket.id, name: nickname, alive: true, isHost: true, role: null, isAI: false });
-    rooms.set(roomId, room);
-    socket.join(roomId);
-    socket.data.roomId = roomId;
-
-    if (cb) cb({ ok: true, roomId });
-    socket.emit('room_created', roomPayload(room));
   });
+}
 
-  socket.on('join_room', (payload, cb) => {
-    const nickname = String((payload && payload.nickname) || '').trim().slice(0, 12);
-    const roomId = String((payload && payload.roomId) || '').trim().toUpperCase();
-    if (!nickname) return cb && cb({ ok: false, error: '暱稱不可為空' });
+let timerHandle = null;
+function startTimer(el){
+  clearInterval(timerHandle);
+  if(!el) return;
+  const tick = () => {
+    if(!state.endsAt){ el.textContent = '--'; return; }
+    const left = Math.max(0, Math.ceil((state.endsAt - Date.now())/1000));
+    el.textContent = left;
+    el.style.color = left <= 5 ? 'var(--wolf)' : 'var(--accent)';
+  };
+  tick();
+  timerHandle = setInterval(tick, 500);
+}
 
-    const room = rooms.get(roomId);
-    if (!room) return cb && cb({ ok: false, error: '找不到房間' });
-    if (room.phase !== 'LOBBY') return cb && cb({ ok: false, error: '遊戲已開始' });
-    if (room.players.length >= 18) return cb && cb({ ok: false, error: '房間已滿（18 人）' });
-    if (room.players.some(p => p.name === nickname)) return cb && cb({ ok: false, error: '暱稱已被使用' });
+function GameOverModal(){
+  const { winner, reason } = state.gameOver;
+  const isGood = winner === 'GOOD';
+  const el = document.createElement('div');
+  el.className = 'lobby';
+  el.style.cssText = 'position:fixed;inset:0;background:rgba(5,7,12,.9);z-index:100;overflow-y:auto;padding:20px';
+  el.innerHTML = `
+    <div class="lobby-card" style="text-align:center;margin:auto">
+      <h1 style="color:${isGood?'var(--good)':'var(--wolf)'};font-size:22px">
+        ${isGood ? '🎉 正義陣營勝利' : '👹 邪惡陣營勝利'}
+      </h1>
+      <p style="color:var(--muted);margin:12px 0 20px;font-size:13px">${reason}</p>
+      <div style="text-align:left;font-size:13px;line-height:2">
+        ${state.players.map(p => {
+          const info = ROLE_INFO[p.role];
+          const color = info?.camp === 'wolf' || info?.camp === 'sniper' ? 'var(--wolf)' : 'var(--good)';
+          return `
+            <div style="display:flex;justify-content:space-between;${p.alive?'':'opacity:.5'}">
+              <span>${p.isAI?'🤖 ':''}${p.name}</span>
+              <span style="color:${color}">${info?.icon || ''} ${info?.name || p.role} ${p.alive?'':'（出局）'}</span>
+            </div>`;
+        }).join('')}
+      </div>
+      <div style="display:flex;gap:10px;margin-top:20px">
+        <button class="btn ghost" id="back-room">回到房間</button>
+        <button class="btn" id="back-lobby">離開到大廳</button>
+      </div>
+    </div>
+  `;
+  el.querySelector('#back-room').onclick = () => {
+    state.gameOver = null; state.screen = 'room'; state.phase = 'LOBBY'; render();
+    socket.emit('return_to_lobby');
+  };
+  el.querySelector('#back-lobby').onclick = () => { state.gameOver = null; leaveRoom(); };
+  return el;
+}
 
-    room.players.push({ id: socket.id, name: nickname, alive: true, isHost: false, role: null, isAI: false });
-    socket.join(roomId);
-    socket.data.roomId = roomId;
+/* ===== Socket 監聽 ===== */
+socket.on('connect', () => { state.myId = socket.id; });
 
-    if (cb) cb({ ok: true });
-    socket.emit('room_joined', roomPayload(room));
-    emitRoomState(room);
-    systemMsg(room, nickname + ' 加入了房間。');
-  });
-
-  socket.on('add_ai_player', (payload, cb) => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room) return cb && cb({ ok: false, error: '房間不存在' });
-    if (room.hostId !== socket.id) return cb && cb({ ok: false, error: '只有房主可以新增 AI' });
-    if (room.phase !== 'LOBBY') return cb && cb({ ok: false, error: '遊戲已開始' });
-    if (room.players.length >= 18) return cb && cb({ ok: false, error: '房間已滿' });
-
-    const usedNames = room.players.map(p => p.name);
-    let name = AI_NAMES.find(n => !usedNames.includes(n));
-    if (!name) name = 'AI-' + Math.floor(Math.random() * 999);
-
-    room.players.push({ id: genAiId(room), name, alive: true, isHost: false, role: null, isAI: true });
-    if (cb) cb({ ok: true });
-    emitRoomState(room);
-    broadcastPlayers(room);
-    systemMsg(room, 'AI 玩家「' + name + '」加入了房間。');
-  });
-
-  socket.on('remove_ai_player', (payload, cb) => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room) return cb && cb({ ok: false, error: '房間不存在' });
-    if (room.hostId !== socket.id) return cb && cb({ ok: false, error: '只有房主可以移除 AI' });
-    if (room.phase !== 'LOBBY') return cb && cb({ ok: false, error: '遊戲已開始' });
-
-    const aiId = payload && payload.playerId;
-    const ai = room.players.find(p => p.id === aiId && p.isAI);
-    if (!ai) return cb && cb({ ok: false, error: '找不到該 AI' });
-
-    room.players = room.players.filter(p => p.id !== aiId);
-    if (cb) cb({ ok: true });
-    emitRoomState(room);
-    broadcastPlayers(room);
-    systemMsg(room, 'AI 玩家「' + ai.name + '」已被移除。');
-  });
-
-  socket.on('leave_room', () => handleLeave(socket));
-  socket.on('disconnect', () => { console.log('[-] disconnected:', socket.id); handleLeave(socket); });
-
-  socket.on('start_game', (payload, cb) => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room) return cb && cb({ ok: false, error: '房間不存在' });
-    if (room.hostId !== socket.id) return cb && cb({ ok: false, error: '只有房主可開始' });
-    if (room.phase !== 'LOBBY') return cb && cb({ ok: false, error: '遊戲已開始' });
-    if (room.players.length < 6) return cb && cb({ ok: false, error: '至少需要 6 人' });
-    if (room.players.length > 18) return cb && cb({ ok: false, error: '最多 18 人' });
-    if (cb) cb({ ok: true });
-    startGame(room);
-  });
-
-  socket.on('return_to_lobby', () => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room) return;
-    clearTimeout(room.timer);
-    room.phase = 'LOBBY';
-    room.day = 0;
-    room.votes = {};
-    room.wolfVotes = {};
-    room.wolfTarget = null;
-    room.seerChecks = {};
-    room.pendingDeaths = [];
-    room.doctorTarget = null;
-    room.sniperTarget = null;
-    room.emptyShotCount = {};
-    room.players.forEach(p => { p.alive = true; p.role = null; p.deathCause = null; });
-    emitRoomState(room);
-    broadcastPlayers(room);
-  });
-
-  socket.on('wolf_kill', payload => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.phase !== 'NIGHT_WOLF') return;
-    const me = room.players.find(p => p.id === socket.id);
-    if (!me || me.role !== 'WEREWOLF' || !me.alive) return;
-
-    const targetId = payload && payload.targetId;
-    const target = room.players.find(p => p.id === targetId && p.alive);
-    if (!target || target.id === me.id) return;
-
-    room.wolfVotes[socket.id] = targetId;
-    checkWolfUnified(room);
-  });
-
-  socket.on('seer_check', payload => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.phase !== 'NIGHT_SEER') return;
-    const me = room.players.find(p => p.id === socket.id);
-    if (!me || me.role !== 'SEER' || !me.alive) return;
-
-    const targetId = payload && payload.targetId;
-    const target = room.players.find(p => p.id === targetId && p.alive);
-    if (!target || target.id === me.id) return;
-
-    if (!room.seerChecks[me.id]) room.seerChecks[me.id] = {};
-    const camp = (target.role === 'WEREWOLF' || target.role === 'SNIPER') ? 'WOLF' : 'GOOD';
-    room.seerChecks[me.id][target.id] = camp;
-
-    io.to(me.id).emit('seer_result', { targetId: target.id, targetName: target.name, camp });
-    io.to(me.id).emit('phase_changed', phasePayload(room, me, ''));
-  });
-
-  // 醫生施針
-  socket.on('doctor_heal', payload => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.phase !== 'NIGHT_DOCTOR') return;
-    const me = room.players.find(p => p.id === socket.id);
-    if (!me || me.role !== 'DOCTOR' || !me.alive) return;
-
-    const targetId = payload && payload.targetId;
-    const target = room.players.find(p => p.id === targetId && p.alive);
-    if (!target) return;
-
-    room.doctorTarget = targetId;
-    clearTimeout(room.timer);
-    setTimeout(() => nextAfterDoctor(room), 800);
-  });
-
-  socket.on('doctor_skip', () => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.phase !== 'NIGHT_DOCTOR') return;
-    const me = room.players.find(p => p.id === socket.id);
-    if (!me || me.role !== 'DOCTOR' || !me.alive) return;
-    room.doctorTarget = null;
-    clearTimeout(room.timer);
-    nextAfterDoctor(room);
-  });
-
-  // 狙擊手開槍
-  socket.on('sniper_shoot', payload => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.phase !== 'NIGHT_SNIPER') return;
-    const me = room.players.find(p => p.id === socket.id);
-    if (!me || me.role !== 'SNIPER' || !me.alive) return;
-
-    const targetId = payload && payload.targetId;
-    const target = room.players.find(p => p.id === targetId && p.alive);
-    if (!target || target.id === me.id) return;
-
-    room.sniperTarget = targetId;
-    room.sniperShotsLeft -= 1;
-    clearTimeout(room.timer);
-    setTimeout(() => resolveNight(room), 800);
-  });
-
-  socket.on('sniper_skip', () => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.phase !== 'NIGHT_SNIPER') return;
-    const me = room.players.find(p => p.id === socket.id);
-    if (!me || me.role !== 'SNIPER' || !me.alive) return;
-    room.sniperTarget = null;
-    clearTimeout(room.timer);
-    resolveNight(room);
-  });
-
-  socket.on('day_vote', payload => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.phase !== 'DAY_VOTE') return;
-    const me = room.players.find(p => p.id === socket.id);
-    if (!me || !me.alive) return;
-    if (room.votes[me.id] !== undefined) return;
-
-    room.votes[me.id] = (payload && payload.targetId) || null;
-    io.to(room.roomId).emit('vote_updated', { votes: tallyVotes(room) });
-
-    const aliveCount = room.players.filter(p => p.alive).length;
-    if (Object.keys(room.votes).length >= aliveCount) {
-      clearTimeout(room.timer);
-      setTimeout(() => resolveVote(room), 800);
-    }
-  });
-
-  socket.on('chat_send', payload => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room) return;
-    const me = room.players.find(p => p.id === socket.id);
-    if (!me) return;
-
-    const channel = (payload && payload.channel) || 'PUBLIC';
-    const text = String((payload && payload.text) || '').trim().slice(0, 200);
-    if (!text) return;
-
-    const msg = { channel, from: me.name, text };
-
-    if (channel === 'WOLF') {
-      if (me.role !== 'WEREWOLF') return;
-      room.players.filter(p => p.role === 'WEREWOLF' && !p.isAI)
-        .forEach(p => io.to(p.id).emit('chat_message', msg));
-      return;
-    }
-    if (channel === 'EVIL') {
-      if (me.role !== 'WEREWOLF' && me.role !== 'SNIPER') return;
-      room.players.filter(p => (p.role === 'WEREWOLF' || p.role === 'SNIPER') && !p.isAI)
-        .forEach(p => io.to(p.id).emit('chat_message', msg));
-      return;
-    }
-    if (channel === 'DEAD') {
-      if (me.alive) return;
-      room.players.filter(p => !p.alive && !p.isAI)
-        .forEach(p => io.to(p.id).emit('chat_message', msg));
-      return;
-    }
-    io.to(room.roomId).emit('chat_message', { channel: 'PUBLIC', from: me.name, text });
-  });
+socket.on('room_created', payload => {
+  state.roomId = payload.roomId; state.players = payload.players; state.phase = payload.phase;
+  state.isHost = true; state.screen = 'room'; render();
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log('🐺 狼人殺伺服器已啟動，port = ' + PORT);
+socket.on('room_joined', payload => {
+  state.roomId = payload.roomId; state.players = payload.players; state.phase = payload.phase;
+  state.isHost = payload.players.find(p => p.id === state.myId)?.isHost || false;
+  state.screen = 'room'; render();
 });
+
+socket.on('room_updated', payload => {
+  state.players = payload.players; state.phase = payload.phase;
+  state.isHost = payload.players.find(p => p.id === state.myId)?.isHost || false;
+  render();
+});
+
+socket.on('players_updated', ({ players }) => { state.players = players; render(); });
+
+socket.on('game_started', ({ myRole, players, doctorShots, sniperShots }) => {
+  state.myRole = myRole; state.players = players;
+  state.doctorShotsLeft = doctorShots || 0;
+  state.sniperShotsLeft = sniperShots || 0;
+  state.screen = 'board';
+  state.chats = { PUBLIC: [], WOLF: [], EVIL: [], DEAD: [] };
+  state.chatTab = myRole === 'WEREWOLF' ? 'WOLF' : myRole === 'SNIPER' ? 'EVIL' : 'PUBLIC';
+  render();
+  const info = ROLE_INFO[myRole];
+  alert('你的身分是：' + info.icon + ' ' + info.name + '\n\n' + info.desc);
+});
+
+socket.on('phase_changed', payload => {
+  state.phase = payload.phase; state.day = payload.day;
+  state.endsAt = payload.endsAt; state.phaseData = payload.data || {};
+  state.myVote = null; state.selectedTarget = null;
+
+  if(state.phaseData.shotsLeft !== undefined){
+    if(state.myRole === 'DOCTOR') state.doctorShotsLeft = state.phaseData.shotsLeft;
+    if(state.myRole === 'SNIPER') state.sniperShotsLeft = state.phaseData.shotsLeft;
+  }
+
+  if(payload.phase.startsWith('DAY') && (state.chatTab === 'WOLF' || state.chatTab === 'EVIL')) {
+    state.chatTab = 'PUBLIC';
+  }
+  if(state.screen !== 'board') state.screen = 'board';
+  render();
+  if(payload.speech?.text) showJudgeBar(payload.speech.text);
+});
+
+socket.on('vote_updated', ({ votes }) => { state.phaseData.votes = votes; render(); });
+
+socket.on('chat_message', msg => {
+  const ch = msg.channel || 'PUBLIC';
+  if(!state.chats[ch]) state.chats[ch] = [];
+  state.chats[ch].push(msg);
+  if(state.chatTab === ch) render();
+});
+
+socket.on('seer_result', ({ targetName, camp }) => {
+  alert(`查驗結果：${targetName} 是 ${camp === 'WOLF' ? '🐺 壞人' : '✅ 好人'}`);
+});
+
+socket.on('game_over', ({ winner, players, reason }) => {
+  state.gameOver = { winner, reason }; state.players = players; render();
+});
+
+socket.on('error_message', ({ message }) => alert(message));
+
+function showJudgeBar(text){
+  document.querySelector('.judge-bar')?.remove();
+  const el = document.createElement('div');
+  el.className = 'judge-bar';
+  el.textContent = '🎙 ' + text;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 6000);
+}
+
+render();
+</script>
+</body>
+</html>
