@@ -525,13 +525,41 @@ function ActionPanelHTML(){
           </button>
         </div>`;
     }
-    case 'NIGHT_SEER': {
+        case 'NIGHT_SEER': {
       if(state.myRole !== 'SEER') return `<div class="desc">🌙 天黑請閉眼…</div>`;
       const checks = d.checks || {};
       const checkedList = Object.entries(checks).map(([id,c]) => `${nameOf(id)}：${c==='WOLF'?'🐺 壞人':'✅ 好人'}`).join('<br/>');
+      const myVote = d.mySeerVote;
+      const mateVotes = d.seerTeammateVotes || {};
+      const matesCount = d.seerMatesCount || 0;
+      const votedCount = d.seerVotedCount || 0;
+      const totalSeers = matesCount + 1;
+
+      // 同伴投票面板
+      let matePanel = '';
+      if (matesCount > 0 && Object.keys(mateVotes).length > 0) {
+        const rows = Object.entries(mateVotes)
+          .map(([id, v]) => `<div style="display:flex;justify-content:space-between;padding:3px 0"><span>${v.name}</span><span style="color:var(--doctor)">→ ${v.targetName}</span></div>`)
+          .join('');
+        matePanel = `<div class="shoot-info">🔮 同伴投票：<br/>${rows}</div>`;
+      }
+
+      // 已投過票 → 顯示等待狀態
+      if (myVote) {
+        const mateInfo = matesCount > 0
+          ? `<div class="desc">已投票 ${votedCount}/${totalSeers} 位警察</div>`
+          : `<div class="desc">已送出查驗，等待結果…</div>`;
+        return `
+          <div class="title">🔮 警察查驗</div>
+          <div class="desc">✅ 你已投票給 <b style="color:var(--doctor)">${nameOf(myVote)}</b></div>
+          ${matePanel}
+          ${mateInfo}`;
+      }
+
       return `
         <div class="title">🔮 警察查驗</div>
-        <div class="desc">點擊玩家頭像查驗陣營。</div>
+        <div class="desc">${matesCount > 0 ? `點擊玩家頭像投票，所有警察共同決定查驗對象（${totalSeers} 位警察）。` : '點擊玩家頭像查驗陣營。'}</div>
+        ${matePanel}
         ${checkedList ? `<div class="desc" style="border-top:1px solid var(--line);padding-top:8px">${checkedList}</div>` : ''}
         <div class="btns">
           <button class="btn good" data-action="seer_confirm" ${state.selectedTarget?'':'disabled'}>
@@ -727,6 +755,10 @@ socket.on('phase_changed', payload => {
 });
 
 socket.on('teammate_votes', ({ votes }) => {
+  socket.on('seer_teammate_votes', ({ votes }) => {
+  if(state.phaseData) state.phaseData.seerTeammateVotes = votes || {};
+  render();
+});
   state.teammateVotes = votes || {};
   render();
 });
