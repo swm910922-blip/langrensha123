@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端主程式（無女巫 + AI 玩家）
+// 狼人殺後端（無女巫 + AI 玩家 + 修復狼人殺人）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -30,9 +30,6 @@ const PHASE_SECONDS = {
   HUNTER_SHOOT: 25,
 };
 
-// ============================================================
-// 工具函式
-// ============================================================
 function genRoomId(len) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let id = '';
@@ -90,9 +87,15 @@ function systemMsg(room, text) {
   });
 }
 
-// ============================================================
-// 角色分配（無女巫）
-// ============================================================
+// 找出票數最高的目標
+function topVoted(tally) {
+  let max = 0, top = null;
+  Object.keys(tally).forEach(id => {
+    if (tally[id] > max) { max = tally[id]; top = id; }
+  });
+  return top;
+}
+
 function assignRoles(n) {
   const table = {
     6:  { WEREWOLF: 2, SEER: 1, HUNTER: 1, VILLAGER: 2 },
@@ -126,19 +129,25 @@ function genAiId(room) {
   return 'ai_' + i;
 }
 
+// AI 狼人選目標（關鍵：如果有其他狼人已投票，100% 跟隨）
 function aiWolfPick(room, ai) {
   const targets = room.players.filter(p =>
     p.alive && p.id !== ai.id && p.role !== 'WEREWOLF'
   );
   if (!targets.length) return null;
 
+  // 檢查其他狼人是否已經投票
   const wolves = room.players.filter(p => p.role === 'WEREWOLF' && p.alive);
   const otherVotes = wolves
     .filter(w => w.id !== ai.id && room.wolfVotes[w.id])
     .map(w => room.wolfVotes[w.id]);
-  if (otherVotes.length && Math.random() < 0.6) {
+
+  // 如果有狼人已經投票 → 直接跟隨（100%）
+  if (otherVotes.length) {
     return otherVotes[0];
   }
+
+  // 否則：優先殺預言家（70%），否則隨機
   const seer = targets.find(p => p.role === 'SEER');
   if (seer && Math.random() < 0.7) return seer.id;
   return targets[Math.floor(Math.random() * targets.length)].id;
@@ -162,13 +171,8 @@ function aiVotePick(room, ai) {
     const knownWolf = targets.find(p => checked[p.id] === 'WOLF');
     if (knownWolf) return knownWolf.id;
     const current = tallyVotes(room);
-    let max = 0, top = null;
-    Object.keys(current).forEach(id => {
-      if (current[id] > max && targets.find(t => t.id === id)) {
-        max = current[id]; top = id;
-      }
-    });
-    if (top) return top;
+    const top = topVoted(current);
+    if (top && targets.find(t => t.id === top)) return top;
   }
 
   if (ai.role === 'WEREWOLF') {
@@ -224,16 +228,34 @@ function aiSpeak(room, ai) {
   });
 }
 
+// 🔧 修復：狼人投票統一邏輯（取多數票，而非要求全數相同）
 function checkWolfUnified(room) {
   const wolves = room.players.filter(p => p.role === 'WEREWOLF' && p.alive);
-  const votes = wolves.map(w => room.wolfVotes[w.id]);
-  const allVoted = votes.every(v => v);
-  const unified = allVoted && votes.every(v => v === votes[0]);
+  if (!wolves.length) return;
 
-  if (unified) {
-    room.wolfTarget = votes[0];
+  const votes = wolves.map(w => room.wolfVotes[w.id]);
+  const votedCount = votes.filter(v => v).length;
+
+  // 全部狼人都投了 → 取多數票（避免因為意見不同而卡住）
+  if (votedCount === wolves.length) {
+    const tally = {};
+    votes.forEach(v => { if (v) tally[v] = (tally[v] || 0) + 1; });
+    const target = topVoted(tally);
+    room.wolfTarget = target;
+
+    if (target) {
+      wolves.forEach(w => {
+        if (!w.isAI) {
+          io.to(w.id).emit('chat_message', {
+            channel: 'WOLF', system: true,
+            text: '狼隊已鎖定目標：' + nameOf(room, target)
+          });
+        }
+      });
+    }
     setPhase(room, 'NIGHT_SEER');
   } else {
+    // 部分狼人投票 → 只更新狼人視角
     wolves.forEach(w => {
       if (!w.isAI) {
         io.to(w.id).emit('phase_changed', phasePayload(room, w, ''));
@@ -317,9 +339,6 @@ function scheduleAiActions(room, phase) {
   }
 }
 
-// ============================================================
-// 法官台詞
-// ============================================================
 function judgeSpeech(room, phase) {
   const d = room.day;
   switch (phase) {
@@ -337,9 +356,6 @@ function judgeSpeech(room, phase) {
   }
 }
 
-// ============================================================
-// 階段切換
-// ============================================================
 function phasePayload(room, player, speechText) {
   const data = { selectableIds: [] };
   const aliveOthers = room.players.filter(p => p.alive && p.id !== player.id).map(p => p.id);
@@ -403,7 +419,19 @@ function setPhase(room, phase) {
 function onPhaseTimeout(room, phase) {
   if (room.phase !== phase) return;
 
-  if (phase === 'NIGHT_WOLF')      return setPhase(room, 'NIGHT_SEER');
+  // 🔧 修復：狼人階段超時時，如果還沒鎖定目標，從現有票數中挑一個
+  if (phase === 'NIGHT_WOLF') {
+    if (!room.wolfTarget) {
+      const tally = {};
+      Object.values(room.wolfVotes).forEach(v => { if (v) tally[v] = (tally[v] || 0) + 1; });
+      room.wolfTarget = topVoted(tally);
+      if (room.wolfTarget) {
+        systemMsg(room, '狼人未達成共識，隨機選定了目標。');
+      }
+    }
+    return setPhase(room, 'NIGHT_SEER');
+  }
+
   if (phase === 'NIGHT_SEER')      return resolveNight(room);
   if (phase === 'DAY_ANNOUNCE')    return afterAnnounce(room);
   if (phase === 'DAY_DISCUSS')     return setPhase(room, 'DAY_VOTE');
@@ -411,9 +439,6 @@ function onPhaseTimeout(room, phase) {
   if (phase === 'HUNTER_SHOOT')    return hunterShoot(room, null);
 }
 
-// ============================================================
-// 遊戲流程
-// ============================================================
 function startGame(room) {
   const roles = assignRoles(room.players.length);
   room.players.forEach((p, i) => {
@@ -544,9 +569,6 @@ function hunterShoot(room, targetId) {
   else setPhase(room, 'DAY_DISCUSS');
 }
 
-// ============================================================
-// 勝負判定
-// ============================================================
 function checkWin(room) {
   if (room.phase === 'GAME_OVER') return true;
 
@@ -584,9 +606,6 @@ function checkWin(room) {
   return false;
 }
 
-// ============================================================
-// 離房處理
-// ============================================================
 function handleLeave(socket) {
   const roomId = socket.data.roomId;
   if (!roomId) return;
@@ -630,9 +649,6 @@ function handleLeave(socket) {
   emitRoomState(room);
 }
 
-// ============================================================
-// Socket 連線事件
-// ============================================================
 io.on('connection', socket => {
   console.log('[+] connected:', socket.id);
 
@@ -783,6 +799,8 @@ io.on('connection', socket => {
     if (!target || target.id === me.id) return;
 
     room.wolfVotes[socket.id] = targetId;
+
+    // 檢查是否所有狼人都已投票
     checkWolfUnified(room);
   });
 
