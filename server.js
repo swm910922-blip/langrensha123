@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端（AI 讀聊天 + 死亡公布身分 + 陣營投票可見 + AI 跟隨人類狼人）
+// 狼人殺後端（修正：警察一晚限一查 + 死者只能遺言一句 + 聊天不重置）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -42,9 +42,19 @@ function emitRoomState(room) { io.to(room.roomId).emit('room_updated', roomPaylo
 function tallyVotes(room) { const t={}; Object.values(room.votes).forEach(v => { if(v) t[v]=(t[v]||0)+1; }); return t; }
 function topVoted(tally) { let max=0,top=null; Object.keys(tally).forEach(id => { if(tally[id]>max){max=tally[id];top=id;} }); return top; }
 function systemMsg(room, text) { io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', system:true, text }); }
+
+// 🔑 修改：死者的遺言機制
+function killPlayer(room, p, cause) {
+  if (!p || !p.alive) return false;
+  p.alive = false;
+  p.deathCause = cause;
+  p.canSpeakInPublic = true; // 只有一次機會在公開頻道說話（遺言）
+  return true;
+}
+
 function announceDeath(room, player, cause) {
   const causeText = { WOLF:'被狼人殺害', SNIPER:'被狙擊手擊殺', VOTE:'被投票放逐', DOCTOR:'被醫生的空針毒死', DISCONNECT:'離線' }[cause] || '出局';
-  systemMsg(room, `💀 ${player.name} ${causeText}，他的身分是【${roleName(player.role)}】`);
+  systemMsg(room, `💀 ${player.name} ${causeText}，他的身分是【${roleName(player.role)}】，可以發表一句遺言。`);
 }
 
 function assignRoles(n) {
@@ -63,9 +73,6 @@ function assignRoles(n) {
 function doctorShotsFor(n) { return n >= 15 ? 4 : 3; }
 function sniperShotsFor(n) { return n >= 15 ? 4 : 3; }
 
-// ============================================================
-// 🧠 AI 情報收集（讀聊天）
-// ============================================================
 function processChatForAI(room, speakerId, text) {
   const speaker = room.players.find(p => p.id === speakerId);
   if (!speaker) return;
@@ -110,13 +117,9 @@ function processChatForAI(room, speakerId, text) {
   }
 }
 
-// ============================================================
-// AI 決策
-// ============================================================
 const AI_NAMES = ['小狼','阿智','阿呆','小紅','阿明','阿豪','小玉','大頭','阿芬','老張','小陳','阿傑','阿宏','小如','阿文','小婷','阿伯','小胖'];
 function genAiId(room) { let i=1; while(room.players.find(p=>p.id==='ai_'+i)) i++; return 'ai_'+i; }
 
-// 🔑 AI 狼人：優先跟隨人類狼人
 function aiWolfPick(room, ai) {
   const intel = room.aiIntel[ai.id] || {};
   const targets = room.players.filter(p => p.alive && p.id !== ai.id && p.role !== 'WEREWOLF' && p.role !== 'SNIPER');
@@ -124,7 +127,6 @@ function aiWolfPick(room, ai) {
     const fb = room.players.filter(p => p.alive && p.id !== ai.id);
     return fb.length ? fb[Math.floor(Math.random()*fb.length)].id : null;
   }
-
   const wolves = room.players.filter(p => p.role === 'WEREWOLF' && p.alive);
   const humanWolves = wolves.filter(w => !w.isAI);
   const humanVotes = humanWolves.filter(w => room.wolfVotes[w.id]).map(w => room.wolfVotes[w.id]);
@@ -134,10 +136,8 @@ function aiWolfPick(room, ai) {
     const pk = targets.find(t => t.id === intel.priorityKill);
     if (pk && Math.random() < 0.85) return pk.id;
   }
-
   const otherAiVotes = wolves.filter(w => w.isAI && w.id !== ai.id && room.wolfVotes[w.id]).map(w => room.wolfVotes[w.id]);
   if (otherAiVotes.length) return otherAiVotes[0];
-
   const seer = targets.find(p => p.role === 'SEER');
   if (seer && Math.random() < 0.6) return seer.id;
   return targets[Math.floor(Math.random()*targets.length)].id;
@@ -177,13 +177,11 @@ function aiVotePick(room, ai) {
   const intel = room.aiIntel[ai.id] || {};
   const targets = room.players.filter(p => p.alive && p.id !== ai.id);
   if (!targets.length) return null;
-
   if (ai.role === 'SEER') {
     const checked = room.seerChecks[ai.id] || {};
     const knownWolf = targets.find(p => checked[p.id] === 'WOLF');
     if (knownWolf) return knownWolf.id;
   }
-
   if (ai.role !== 'WEREWOLF' && ai.role !== 'SNIPER' && intel.suspicion) {
     const suspects = targets.filter(t => intel.suspicion[t.id] && !intel.trusted?.[t.id]);
     if (suspects.length && Math.random() < 0.65) {
@@ -191,16 +189,13 @@ function aiVotePick(room, ai) {
       return suspects[0].id;
     }
   }
-
   if ((ai.role === 'WEREWOLF' || ai.role === 'SNIPER') && intel.claimedSeer) {
     const t = targets.find(x => x.id === intel.claimedSeer);
     if (t && Math.random() < 0.6) return t.id;
   }
-
   const current = tallyVotes(room);
   const top = topVoted(current);
   if (top && targets.find(t => t.id === top)) return top;
-
   return targets[Math.floor(Math.random()*targets.length)].id;
 }
 
@@ -214,7 +209,6 @@ function aiSpeak(room, ai) {
     VILLAGER: ['我是平民。', '我懷疑昨晚發言最少的人。', '誰一直沒說話？這很可疑。', '我覺得狼人現在應該很緊張。'],
   };
   let pool = templates[ai.role] || templates.VILLAGER;
-
   if (intel.suspicion && (ai.role === 'VILLAGER' || ai.role === 'SEER' || ai.role === 'DOCTOR')) {
     const suspects = Object.entries(intel.suspicion).sort((a,b) => b[1]-a[1]);
     if (suspects.length) {
@@ -290,8 +284,11 @@ function scheduleAiActions(room, phase) {
     ais.filter(p => p.role === 'SEER').forEach(ai => {
       setTimeout(() => {
         if (room.phase !== 'NIGHT_SEER' || !ai.alive) return;
+        // 🔑 AI 警察也只查一次
+        if (room.seerCheckedThisNight[ai.id]) return;
         const target = aiSeerPick(room, ai);
         if (!target) return;
+        room.seerCheckedThisNight[ai.id] = true;
         if (!room.seerChecks[ai.id]) room.seerChecks[ai.id] = {};
         const t = room.players.find(p => p.id === target);
         room.seerChecks[ai.id][target] = (t.role === 'WEREWOLF' || t.role === 'SNIPER') ? 'WOLF' : 'GOOD';
@@ -389,7 +386,13 @@ function phasePayload(room, player, speechText) {
   }
 
   if (room.phase === 'NIGHT_SEER' && player.role === 'SEER' && player.alive) {
-    data.selectableIds = aliveOthers;
+    // 🔑 已查過就不能再選
+    if (room.seerCheckedThisNight[player.id]) {
+      data.selectableIds = [];
+      data.alreadyChecked = true;
+    } else {
+      data.selectableIds = aliveOthers;
+    }
     data.checks = room.seerChecks[player.id] || {};
   }
 
@@ -440,6 +443,8 @@ function setPhase(room, phase) {
   const sec = PHASE_SECONDS[phase] || 20;
   room.endsAt = Date.now() + sec*1000;
   if (phase === 'DAY_VOTE') room.votes = {};
+  // 🔑 進入 NIGHT_SEER 時重置查驗記錄
+  if (phase === 'NIGHT_SEER') room.seerCheckedThisNight = {};
 
   const speech = judgeSpeech(room, phase);
   room.players.forEach(p => {
@@ -483,10 +488,16 @@ function nextAfterDoctor(room) {
 function startGame(room) {
   const n = room.players.length;
   const roles = assignRoles(n);
-  room.players.forEach((p, i) => { p.alive = true; p.role = roles[i]; p.deathCause = null; });
+  room.players.forEach((p, i) => {
+    p.alive = true;
+    p.role = roles[i];
+    p.deathCause = null;
+    p.canSpeakInPublic = false;
+  });
 
   room.day = 0;
   room.seerChecks = {};
+  room.seerCheckedThisNight = {};
   room.wolfVotes = {};
   room.wolfTarget = null;
   room.votes = {};
@@ -529,12 +540,12 @@ function resolveNight(room) {
       systemMsg(room, `💉 醫生施針成功，${nameOf(room, wolfTarget)} 被救活了！`);
     } else {
       const p = room.players.find(x => x.id === wolfTarget);
-      if (p && p.alive) { p.alive = false; p.deathCause = 'WOLF'; deaths.push({ id:p.id, name:p.name }); }
+      if (killPlayer(room, p, 'WOLF')) deaths.push({ id:p.id, name:p.name });
     }
   }
   if (sniperTarget) {
     const p = room.players.find(x => x.id === sniperTarget);
-    if (p && p.alive) { p.alive = false; p.deathCause = 'SNIPER'; deaths.push({ id:p.id, name:p.name }); }
+    if (killPlayer(room, p, 'SNIPER')) deaths.push({ id:p.id, name:p.name });
   }
   if (doctorTarget && room.doctorShotsLeft > 0) {
     room.doctorShotsLeft -= 1;
@@ -544,7 +555,7 @@ function resolveNight(room) {
       room.emptyShotCount[doctorTarget] = (room.emptyShotCount[doctorTarget] || 0) + 1;
       if (room.emptyShotCount[doctorTarget] >= 2) {
         const p = room.players.find(x => x.id === doctorTarget);
-        if (p && p.alive) { p.alive = false; p.deathCause = 'DOCTOR'; deaths.push({ id:p.id, name:p.name }); }
+        if (killPlayer(room, p, 'DOCTOR')) deaths.push({ id:p.id, name:p.name });
       }
     }
   }
@@ -579,9 +590,7 @@ function resolveVote(room) {
   }
   const outId = top[0];
   const p = room.players.find(x => x.id === outId);
-  if (p && p.alive) {
-    p.alive = false;
-    p.deathCause = 'VOTE';
+  if (killPlayer(room, p, 'VOTE')) {
     broadcastPlayers(room);
     announceDeath(room, p, 'VOTE');
   }
@@ -653,11 +662,11 @@ io.on('connection', socket => {
     const roomId = genRoomId(len);
     const room = {
       roomId, hostId:socket.id, phase:'LOBBY', day:0, players:[],
-      wolfVotes:{}, wolfTarget:null, seerChecks:{}, votes:{}, pendingDeaths:[],
+      wolfVotes:{}, wolfTarget:null, seerChecks:{}, seerCheckedThisNight:{}, votes:{}, pendingDeaths:[],
       doctorTarget:null, sniperTarget:null, doctorShotsLeft:0, sniperShotsLeft:0,
       emptyShotCount:{}, aiIntel:{}, timer:null, endsAt:null,
     };
-    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:true, role:null, isAI:false });
+    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:true, role:null, isAI:false, canSpeakInPublic:false });
     rooms.set(roomId, room);
     socket.join(roomId);
     socket.data.roomId = roomId;
@@ -675,7 +684,7 @@ io.on('connection', socket => {
     if (room.players.length >= 18) return cb && cb({ ok:false, error:'房間已滿' });
     if (room.players.some(p => p.name === nickname)) return cb && cb({ ok:false, error:'暱稱已被使用' });
 
-    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:false, role:null, isAI:false });
+    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:false, role:null, isAI:false, canSpeakInPublic:false });
     socket.join(roomId);
     socket.data.roomId = roomId;
     if (cb) cb({ ok:true });
@@ -695,7 +704,7 @@ io.on('connection', socket => {
     let name = AI_NAMES.find(n => !usedNames.includes(n));
     if (!name) name = 'AI-' + Math.floor(Math.random()*999);
 
-    room.players.push({ id:genAiId(room), name, alive:true, isHost:false, role:null, isAI:true });
+    room.players.push({ id:genAiId(room), name, alive:true, isHost:false, role:null, isAI:true, canSpeakInPublic:false });
     if (cb) cb({ ok:true });
     emitRoomState(room);
     broadcastPlayers(room);
@@ -738,10 +747,10 @@ io.on('connection', socket => {
     clearTimeout(room.timer);
     room.phase = 'LOBBY'; room.day = 0;
     room.votes = {}; room.wolfVotes = {}; room.wolfTarget = null;
-    room.seerChecks = {}; room.pendingDeaths = [];
+    room.seerChecks = {}; room.seerCheckedThisNight = {}; room.pendingDeaths = [];
     room.doctorTarget = null; room.sniperTarget = null; room.emptyShotCount = {};
     room.aiIntel = {};
-    room.players.forEach(p => { p.alive = true; p.role = null; p.deathCause = null; });
+    room.players.forEach(p => { p.alive = true; p.role = null; p.deathCause = null; p.canSpeakInPublic = false; });
     emitRoomState(room);
     broadcastPlayers(room);
   });
@@ -758,7 +767,6 @@ io.on('connection', socket => {
 
     room.wolfVotes[socket.id] = targetId;
 
-    // 🔑 AI 狼人立即跟隨人類的決定
     const wolves = room.players.filter(p => p.role === 'WEREWOLF' && p.alive);
     wolves.filter(w => w.isAI).forEach(ai => {
       room.wolfVotes[ai.id] = targetId;
@@ -783,9 +791,18 @@ io.on('connection', socket => {
     if (!room || room.phase !== 'NIGHT_SEER') return;
     const me = room.players.find(p => p.id === socket.id);
     if (!me || me.role !== 'SEER' || !me.alive) return;
+
+    // 🔑 一晚只能查一次
+    if (room.seerCheckedThisNight[me.id]) {
+      io.to(me.id).emit('error_message', { message: '你今晚已經查驗過了。' });
+      return;
+    }
+
     const targetId = payload && payload.targetId;
     const target = room.players.find(p => p.id === targetId && p.alive);
     if (!target || target.id === me.id) return;
+
+    room.seerCheckedThisNight[me.id] = true;
     if (!room.seerChecks[me.id]) room.seerChecks[me.id] = {};
     const camp = (target.role === 'WEREWOLF' || target.role === 'SNIPER') ? 'WOLF' : 'GOOD';
     room.seerChecks[me.id][target.id] = camp;
@@ -864,6 +881,23 @@ io.on('connection', socket => {
     const channel = (payload && payload.channel) || 'PUBLIC';
     const text = String((payload && payload.text) || '').trim().slice(0, 200);
     if (!text) return;
+
+    // 🔑 死者遺言機制：公開頻道只能說一句
+    if (channel === 'PUBLIC') {
+      if (!me.alive) {
+        if (!me.canSpeakInPublic) {
+          io.to(me.id).emit('error_message', { message: '你已經發表過遺言，無法再於公開頻道發言。' });
+          return;
+        }
+        me.canSpeakInPublic = false;
+        // 加上提示前綴
+        const msg = { channel, from: me.name, text: '【遺言】' + text };
+        io.to(room.roomId).emit('chat_message', msg);
+        processChatForAI(room, me.id, text);
+        return;
+      }
+    }
+
     const msg = { channel, from:me.name, text };
 
     if (channel === 'PUBLIC') processChatForAI(room, me.id, text);
