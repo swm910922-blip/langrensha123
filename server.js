@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v3.1（AI 性格系統 + 警察頻道 + 多元決策）
+// 狼人殺後端 v3.2（AI 性格系統 + 警察頻道 + 多元決策）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -81,6 +81,7 @@ function sniperShotsFor(n) { return n >= 15 ? 4 : 3; }
 // 🎭 AI 性格系統
 // ============================================================
 const AI_NAMES = ['小狼','阿智','阿呆','小紅','阿明','阿豪','小玉','大頭','阿芬','老張','小陳','阿傑','阿宏','小如','阿文','小婷','阿伯','小胖'];
+function genAiId(room) { let i=1; while(room.players.find(p=>p.id==='ai_'+i)) i++; return 'ai_'+i; }
 const AI_PERSONALITIES = ['FOLLOWER', 'INTUITIVE', 'THOUGHTFUL', 'CHAOTIC', 'CONSERVATIVE'];
 const PERSONALITY_WEIGHTS = {
   FOLLOWER:     { FOLLOW: 65, RANDOM: 20, CONTRARIAN: 5,  FACTION: 10 },
