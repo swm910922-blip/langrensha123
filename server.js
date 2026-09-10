@@ -1,0 +1,706 @@
+// ============================================================
+// 狼人殺後端主程式
+// ============================================================
+const express = require('express');
+const http = require('http');
+const cors = require('cors');
+const { Server } = require('socket.io');
+
+const app = express();
+app.use(cors({ origin: '*' }));
+app.use(express.static('.'));
+
+app.get('/', (req, res) => {
+  res.send('🐺 狼人殺伺服器運作中');
+});
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: '*', methods: ['GET', 'POST'] }
+});
+
+// ============================================================
+// 記憶體中的房間資料
+// ============================================================
+const rooms = new Map();
+
+// 各階段持續秒數
+const PHASE_SECONDS = {
+  NIGHT_WOLF: 30,
+  NIGHT_SEER: 20,
+  NIGHT_WITCH: 25,
+  DAY_ANNOUNCE: 10,
+  DAY_DISCUSS: 60,
+  DAY_VOTE: 30,
+  HUNTER_SHOOT: 20,
+};
+
+// ============================================================
+// 工具函式
+// ============================================================
+function genRoomId(len) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let id = '';
+  do {
+    id = '';
+    for (let i = 0; i < len; i++) {
+      id += chars[Math.floor(Math.random() * chars.length)];
+    }
+  } while (rooms.has(id));
+  return id;
+}
+
+function nameOf(room, id) {
+  const p = room.players.find(x => x.id === id);
+  return p ? p.name : '未知';
+}
+
+// 只回傳公開資訊（絕不洩漏角色）
+function publicPlayers(room) {
+  return room.players.map(p => ({
+    id: p.id,
+    name: p.name,
+    alive: p.alive,
+    isHost: p.isHost,
+  }));
+}
+
+function roomPayload(room) {
+  return {
+    roomId: room.roomId,
+    players: publicPlayers(room),
+    phase: room.phase,
+  };
+}
+
+function broadcastPlayers(room) {
+  io.to(room.roomId).emit('players_updated', { players: publicPlayers(room) });
+}
+
+function emitRoomState(room) {
+  io.to(room.roomId).emit('room_updated', roomPayload(room));
+}
+
+function tallyVotes(room) {
+  const t = {};
+  Object.values(room.votes).forEach(v => {
+    if (v) t[v] = (t[v] || 0) + 1;
+  });
+  return t;
+}
+
+// ============================================================
+// 角色分配（6–12 人）
+// ============================================================
+function assignRoles(n) {
+  const table = {
+    6:  { WEREWOLF: 2, SEER: 1, WITCH: 1, HUNTER: 1, VILLAGER: 1 },
+    7:  { WEREWOLF: 2, SEER: 1, WITCH: 1, HUNTER: 1, VILLAGER: 2 },
+    8:  { WEREWOLF: 2, SEER: 1, WITCH: 1, HUNTER: 1, VILLAGER: 3 },
+    9:  { WEREWOLF: 3, SEER: 1, WITCH: 1, HUNTER: 1, VILLAGER: 3 },
+    10: { WEREWOLF: 3, SEER: 1, WITCH: 1, HUNTER: 1, VILLAGER: 4 },
+    11: { WEREWOLF: 3, SEER: 1, WITCH: 1, HUNTER: 1, VILLAGER: 5 },
+    12: { WEREWOLF: 4, SEER: 1, WITCH: 1, HUNTER: 1, VILLAGER: 5 },
+  };
+  const cfg = table[n] || table[6];
+  const pool = [];
+  Object.keys(cfg).forEach(role => {
+    for (let i = 0; i < cfg[role]; i++) pool.push(role);
+  });
+  // 洗牌
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
+  }
+  return pool;
+}
+
+// ============================================================
+// 法官台詞
+// ============================================================
+function judgeSpeech(room, phase) {
+  const d = room.day;
+  switch (phase) {
+    case 'NIGHT_WOLF':  return '天黑請閉眼。第 ' + d + ' 夜，狼人請睜眼，請選擇今晚要刺殺的對象。';
+    case 'NIGHT_SEER':  return '狼人請閉眼。預言家請睜眼，請選擇一名玩家查驗身分。';
+    case 'NIGHT_WITCH': return '預言家請閉眼。女巫請睜眼，今晚是否要使用藥水？';
+    case 'DAY_ANNOUNCE': {
+      if (!room.pendingDeaths.length) return '天亮了。第 ' + d + ' 天，昨晚是平安夜。';
+      return '天亮了。昨晚，' + room.pendingDeaths.map(x => x.name).join('、') + ' 倒牌了。';
+    }
+    case 'DAY_DISCUSS': return '現在進入白天討論，請所有玩家依序發言。';
+    case 'DAY_VOTE':    return '發言結束，請所有玩家投票，選出你要放逐的對象。';
+    case 'HUNTER_SHOOT': return '獵人請睜眼，你有一槍，是否要帶走一名玩家？';
+    case 'GAME_OVER':   return '遊戲結束。';
+    default:            return '';
+  }
+}
+
+// ============================================================
+// 階段切換
+// ============================================================
+function phasePayload(room, player, speechText) {
+  const data = { selectableIds: [] };
+  const aliveOthers = room.players.filter(p => p.alive && p.id !== player.id).map(p => p.id);
+
+  if (room.phase === 'NIGHT_WOLF' && player.role === 'WEREWOLF' && player.alive) {
+    data.selectableIds = aliveOthers;
+    data.wolfPartners = room.players
+      .filter(p => p.role === 'WEREWOLF' && p.id !== player.id)
+      .map(p => ({ id: p.id, name: p.name }));
+  }
+
+  if (room.phase === 'NIGHT_SEER' && player.role === 'SEER' && player.alive) {
+    data.selectableIds = aliveOthers;
+    data.checks = room.seerChecks[player.id] || {};
+  }
+
+  if (room.phase === 'NIGHT_WITCH' && player.role === 'WITCH' && player.alive) {
+    data.wolfTargetId = room.wolfTarget;
+    data.wolfTargetName = room.wolfTarget ? nameOf(room, room.wolfTarget) : null;
+    data.canHeal = !room.witch.healUsed && !!room.wolfTarget;
+    data.canPoison = !room.witch.poisonUsed;
+    data.selectableIds = data.canPoison ? aliveOthers : [];
+  }
+
+  if (room.phase === 'DAY_VOTE' && player.alive) {
+    data.selectableIds = aliveOthers;
+  }
+
+  if (room.phase === 'HUNTER_SHOOT') {
+    data.hunterId = room.hunterId;
+    if (player.id === room.hunterId) data.selectableIds = aliveOthers;
+  }
+
+  if (room.phase === 'DAY_ANNOUNCE') {
+    data.deaths = room.pendingDeaths;
+  }
+
+  return {
+    phase: room.phase,
+    day: room.day,
+    endsAt: room.endsAt,
+    data: data,
+    votes: tallyVotes(room),
+    speech: { text: speechText || '' },
+  };
+}
+
+function setPhase(room, phase) {
+  clearTimeout(room.timer);
+  room.phase = phase;
+
+  const sec = PHASE_SECONDS[phase] || 20;
+  room.endsAt = Date.now() + sec * 1000;
+
+  if (phase === 'DAY_VOTE') room.votes = {};
+
+  const speech = judgeSpeech(room, phase);
+
+  // 每個玩家收到「客製化」的資訊
+  room.players.forEach(p => {
+    io.to(p.id).emit('phase_changed', phasePayload(room, p, speech));
+  });
+
+  room.timer = setTimeout(() => onPhaseTimeout(room, phase), sec * 1000 + 500);
+}
+
+function onPhaseTimeout(room, phase) {
+  if (room.phase !== phase) return;
+
+  if (phase === 'NIGHT_WOLF')      return setPhase(room, 'NIGHT_SEER');
+  if (phase === 'NIGHT_SEER')      return setPhase(room, 'NIGHT_WITCH');
+  if (phase === 'NIGHT_WITCH')     return resolveNight(room);
+  if (phase === 'DAY_ANNOUNCE')    return afterAnnounce(room);
+  if (phase === 'DAY_DISCUSS')     return setPhase(room, 'DAY_VOTE');
+  if (phase === 'DAY_VOTE')        return resolveVote(room);
+  if (phase === 'HUNTER_SHOOT')    return hunterShoot(room, null);
+}
+
+// ============================================================
+// 遊戲流程
+// ============================================================
+function startGame(room) {
+  const roles = assignRoles(room.players.length);
+  room.players.forEach((p, i) => {
+    p.alive = true;
+    p.role = roles[i];
+    p.deathCause = null;
+    p.hunterUsed = false;
+  });
+
+  room.day = 0;
+  room.seerChecks = {};
+  room.witch = { healUsed: false, poisonUsed: false };
+  room.wolfVotes = {};
+  room.wolfTarget = null;
+  room.savedByWitch = null;
+  room.poisonTarget = null;
+  room.votes = {};
+  room.pendingDeaths = [];
+  room.hunterId = null;
+
+  // 私發身分牌
+  room.players.forEach(p => {
+    io.to(p.id).emit('game_started', {
+      myRole: p.role,
+      players: publicPlayers(room),
+      day: 0,
+    });
+  });
+
+  setTimeout(() => beginNight(room), 3500);
+}
+
+function beginNight(room) {
+  room.day += 1;
+  room.wolfVotes = {};
+  room.wolfTarget = null;
+  room.savedByWitch = null;
+  room.poisonTarget = null;
+  room.pendingDeaths = [];
+  room.hunterId = null;
+  setPhase(room, 'NIGHT_WOLF');
+}
+
+function resolveNight(room) {
+  const deaths = [];
+
+  if (room.wolfTarget && room.wolfTarget !== room.savedByWitch) {
+    const p = room.players.find(x => x.id === room.wolfTarget);
+    if (p && p.alive) {
+      p.alive = false;
+      p.deathCause = 'WOLF';
+      deaths.push({ id: p.id, name: p.name });
+    }
+  }
+
+  if (room.poisonTarget && room.poisonTarget !== room.savedByWitch) {
+    const p = room.players.find(x => x.id === room.poisonTarget);
+    if (p && p.alive) {
+      p.alive = false;
+      p.deathCause = 'POISON';
+      deaths.push({ id: p.id, name: p.name });
+    }
+  }
+
+  room.pendingDeaths = deaths;
+  room.wolfTarget = null;
+  room.savedByWitch = null;
+  room.poisonTarget = null;
+
+  broadcastPlayers(room);
+  if (checkWin(room)) return;
+  setPhase(room, 'DAY_ANNOUNCE');
+}
+
+function afterAnnounce(room) {
+  const hunter = room.players.find(
+    p => p.role === 'HUNTER' && !p.alive && p.deathCause === 'WOLF' && !p.hunterUsed
+  );
+  if (hunter) {
+    hunter.hunterUsed = true;
+    room.hunterId = hunter.id;
+    room.hunterNext = 'DAY_DISCUSS';
+    return setPhase(room, 'HUNTER_SHOOT');
+  }
+  setPhase(room, 'DAY_DISCUSS');
+}
+
+function resolveVote(room) {
+  if (room.phase !== 'DAY_VOTE') return;
+
+  const t = tallyVotes(room);
+  let max = 0;
+  let top = [];
+  Object.keys(t).forEach(id => {
+    if (t[id] > max) { max = t[id]; top = [id]; }
+    else if (t[id] === max) top.push(id);
+  });
+
+  if (top.length !== 1 || max === 0) {
+    io.to(room.roomId).emit('chat_message', {
+      channel: 'PUBLIC', system: true,
+      text: '平票或全體棄票，本輪無人出局。'
+    });
+    return beginNight(room);
+  }
+
+  const outId = top[0];
+  const p = room.players.find(x => x.id === outId);
+  if (p && p.alive) {
+    p.alive = false;
+    p.deathCause = 'VOTE';
+    broadcastPlayers(room);
+    io.to(room.roomId).emit('chat_message', {
+      channel: 'PUBLIC', system: true,
+      text: p.name + ' 被投票放逐出局。'
+    });
+  }
+
+  if (checkWin(room)) return;
+
+  if (p && p.role === 'HUNTER' && !p.hunterUsed) {
+    p.hunterUsed = true;
+    room.hunterId = p.id;
+    room.hunterNext = 'NIGHT_WOLF';
+    return setPhase(room, 'HUNTER_SHOOT');
+  }
+  beginNight(room);
+}
+
+function hunterShoot(room, targetId) {
+  if (targetId) {
+    const t = room.players.find(x => x.id === targetId && x.alive);
+    if (t) {
+      t.alive = false;
+      t.deathCause = 'HUNTER';
+      broadcastPlayers(room);
+      io.to(room.roomId).emit('chat_message', {
+        channel: 'PUBLIC', system: true,
+        text: '獵人開槍帶走了 ' + t.name + '！'
+      });
+    }
+  } else {
+    io.to(room.roomId).emit('chat_message', {
+      channel: 'PUBLIC', system: true, text: '獵人放棄開槍。'
+    });
+  }
+
+  room.hunterId = null;
+  if (checkWin(room)) return;
+
+  const next = room.hunterNext || 'NIGHT_WOLF';
+  room.hunterNext = null;
+  if (next === 'NIGHT_WOLF') beginNight(room);
+  else setPhase(room, 'DAY_DISCUSS');
+}
+
+// ============================================================
+// 勝負判定
+// ============================================================
+function checkWin(room) {
+  if (room.phase === 'GAME_OVER') return true;
+
+  const alive = room.players.filter(p => p.alive);
+  const wolves = alive.filter(p => p.role === 'WEREWOLF');
+  const villagers = alive.filter(p => p.role === 'VILLAGER');
+  const gods = alive.filter(p => ['SEER', 'WITCH', 'HUNTER'].indexOf(p.role) >= 0);
+
+  let winner = null;
+  let reason = '';
+
+  if (wolves.length === 0) {
+    winner = 'GOOD'; reason = '所有狼人已出局，好人陣營勝利！';
+  } else if (villagers.length === 0) {
+    winner = 'WOLF'; reason = '所有平民出局（屠民），狼人陣營勝利！';
+  } else if (gods.length === 0) {
+    winner = 'WOLF'; reason = '所有神職出局（屠神），狼人陣營勝利！';
+  } else if (wolves.length >= alive.length - wolves.length) {
+    winner = 'WOLF'; reason = '狼人數量已不低於好人，狼人陣營勝利！';
+  }
+
+  if (winner) {
+    clearTimeout(room.timer);
+    room.phase = 'GAME_OVER';
+    io.to(room.roomId).emit('game_over', {
+      winner: winner,
+      reason: reason,
+      players: room.players.map(p => ({
+        id: p.id, name: p.name, alive: p.alive, isHost: p.isHost, role: p.role,
+      })),
+    });
+    return true;
+  }
+  return false;
+}
+
+// ============================================================
+// 離房處理
+// ============================================================
+function handleLeave(socket) {
+  const roomId = socket.data.roomId;
+  if (!roomId) return;
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  const idx = room.players.findIndex(p => p.id === socket.id);
+  if (idx === -1) return;
+
+  const removed = room.players[idx];
+  room.players.splice(idx, 1);
+  socket.leave(roomId);
+  socket.data.roomId = null;
+
+  const inGame = room.phase !== 'LOBBY' && room.phase !== 'GAME_OVER';
+  if (inGame) {
+    removed.alive = false;
+    broadcastPlayers(room);
+    io.to(roomId).emit('chat_message', {
+      channel: 'PUBLIC', system: true, text: removed.name + ' 已離線。'
+    });
+    if (checkWin(room)) return;
+  }
+
+  if (room.players.length === 0) {
+    clearTimeout(room.timer);
+    rooms.delete(roomId);
+    return;
+  }
+
+  if (room.hostId === removed.id) {
+    room.hostId = room.players[0].id;
+    room.players[0].isHost = true;
+  }
+
+  emitRoomState(room);
+}
+
+// ============================================================
+// Socket 連線事件
+// ============================================================
+io.on('connection', socket => {
+  console.log('[+] connected:', socket.id);
+
+  // ----- 建立房間 -----
+  socket.on('create_room', (payload, cb) => {
+    const nickname = String((payload && payload.nickname) || '').trim().slice(0, 12);
+    const len = (payload && payload.roomIdLength === 4) ? 4 : 6;
+    if (!nickname) return cb && cb({ ok: false, error: '暱稱不可為空' });
+
+    const roomId = genRoomId(len);
+    const room = {
+      roomId: roomId,
+      hostId: socket.id,
+      phase: 'LOBBY',
+      day: 0,
+      players: [],
+      wolfVotes: {},
+      wolfTarget: null,
+      seerChecks: {},
+      witch: { healUsed: false, poisonUsed: false },
+      votes: {},
+      pendingDeaths: [],
+      timer: null,
+      endsAt: null,
+      hunterId: null,
+      hunterNext: null,
+    };
+    room.players.push({
+      id: socket.id, name: nickname, alive: true, isHost: true, role: null,
+    });
+    rooms.set(roomId, room);
+    socket.join(roomId);
+    socket.data.roomId = roomId;
+
+    if (cb) cb({ ok: true, roomId: roomId });
+    socket.emit('room_created', roomPayload(room));
+  });
+
+  // ----- 加入房間 -----
+  socket.on('join_room', (payload, cb) => {
+    const nickname = String((payload && payload.nickname) || '').trim().slice(0, 12);
+    const roomId = String((payload && payload.roomId) || '').trim().toUpperCase();
+
+    if (!nickname) return cb && cb({ ok: false, error: '暱稱不可為空' });
+    const room = rooms.get(roomId);
+    if (!room) return cb && cb({ ok: false, error: '找不到房間' });
+    if (room.phase !== 'LOBBY') return cb && cb({ ok: false, error: '遊戲已開始' });
+    if (room.players.length >= 12) return cb && cb({ ok: false, error: '房間已滿' });
+    if (room.players.some(p => p.name === nickname))
+      return cb && cb({ ok: false, error: '暱稱已被使用' });
+
+    room.players.push({
+      id: socket.id, name: nickname, alive: true, isHost: false, role: null,
+    });
+    socket.join(roomId);
+    socket.data.roomId = roomId;
+
+    if (cb) cb({ ok: true });
+    socket.emit('room_joined', roomPayload(room));
+    emitRoomState(room);
+    io.to(roomId).emit('chat_message', {
+      channel: 'PUBLIC', system: true, text: nickname + ' 加入了房間。'
+    });
+  });
+
+  // ----- 離開 -----
+  socket.on('leave_room', () => handleLeave(socket));
+  socket.on('disconnect', () => {
+    console.log('[-] disconnected:', socket.id);
+    handleLeave(socket);
+  });
+
+  // ----- 開始遊戲 -----
+  socket.on('start_game', (payload, cb) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room) return cb && cb({ ok: false, error: '房間不存在' });
+    if (room.hostId !== socket.id) return cb && cb({ ok: false, error: '只有房主可開始' });
+    if (room.phase !== 'LOBBY') return cb && cb({ ok: false, error: '遊戲已開始' });
+    if (room.players.length < 6) return cb && cb({ ok: false, error: '至少需要 6 人' });
+
+    if (cb) cb({ ok: true });
+    startGame(room);
+  });
+
+  // ----- 回到大廳 -----
+  socket.on('return_to_lobby', () => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room) return;
+    clearTimeout(room.timer);
+    room.phase = 'LOBBY';
+    room.day = 0;
+    room.votes = {};
+    room.wolfVotes = {};
+    room.wolfTarget = null;
+    room.seerChecks = {};
+    room.witch = { healUsed: false, poisonUsed: false };
+    room.pendingDeaths = [];
+    room.hunterId = null;
+    room.players.forEach(p => {
+      p.alive = true; p.role = null; p.deathCause = null; p.hunterUsed = false;
+    });
+    emitRoomState(room);
+    broadcastPlayers(room);
+  });
+
+  // ----- 狼人殺人 -----
+  socket.on('wolf_kill', payload => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.phase !== 'NIGHT_WOLF') return;
+    const me = room.players.find(p => p.id === socket.id);
+    if (!me || me.role !== 'WEREWOLF' || !me.alive) return;
+
+    const targetId = payload && payload.targetId;
+    const target = room.players.find(p => p.id === targetId && p.alive);
+    if (!target || target.id === me.id) return;
+
+    room.wolfVotes[socket.id] = targetId;
+
+    const wolves = room.players.filter(p => p.role === 'WEREWOLF' && p.alive);
+    const votes = wolves.map(w => room.wolfVotes[w.id]);
+    const allVoted = votes.every(v => v);
+    const unified = allVoted && votes.every(v => v === votes[0]);
+
+    if (unified) {
+      room.wolfTarget = votes[0];
+      setPhase(room, 'NIGHT_SEER');
+    } else {
+      wolves.forEach(w => {
+        io.to(w.id).emit('phase_changed', phasePayload(room, w, ''));
+      });
+    }
+  });
+
+  // ----- 預言家查驗 -----
+  socket.on('seer_check', payload => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.phase !== 'NIGHT_SEER') return;
+    const me = room.players.find(p => p.id === socket.id);
+    if (!me || me.role !== 'SEER' || !me.alive) return;
+
+    const targetId = payload && payload.targetId;
+    const target = room.players.find(p => p.id === targetId && p.alive);
+    if (!target || target.id === me.id) return;
+
+    if (!room.seerChecks[me.id]) room.seerChecks[me.id] = {};
+    const camp = target.role === 'WEREWOLF' ? 'WOLF' : 'GOOD';
+    room.seerChecks[me.id][target.id] = camp;
+
+    io.to(me.id).emit('seer_result', {
+      targetId: target.id, targetName: target.name, camp: camp,
+    });
+    io.to(me.id).emit('phase_changed', phasePayload(room, me, ''));
+  });
+
+  // ----- 女巫用藥 -----
+  socket.on('witch_action', payload => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.phase !== 'NIGHT_WITCH') return;
+    const me = room.players.find(p => p.id === socket.id);
+    if (!me || me.role !== 'WITCH' || !me.alive) return;
+
+    const action = payload && payload.action;
+    const targetId = payload && payload.targetId;
+
+    if (action === 'HEAL') {
+      if (room.witch.healUsed || !room.wolfTarget) return;
+      room.witch.healUsed = true;
+      room.savedByWitch = room.wolfTarget;
+    } else if (action === 'POISON') {
+      if (room.witch.poisonUsed) return;
+      const t = room.players.find(p => p.id === targetId && p.alive);
+      if (!t || t.id === me.id) return;
+      room.witch.poisonUsed = true;
+      room.poisonTarget = t.id;
+    }
+    resolveNight(room);
+  });
+
+  // ----- 白天投票 -----
+  socket.on('day_vote', payload => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.phase !== 'DAY_VOTE') return;
+    const me = room.players.find(p => p.id === socket.id);
+    if (!me || !me.alive) return;
+    if (room.votes[me.id] !== undefined) return;
+
+    room.votes[me.id] = (payload && payload.targetId) || null;
+    io.to(room.roomId).emit('vote_updated', { votes: tallyVotes(room) });
+
+    const aliveCount = room.players.filter(p => p.alive).length;
+    const votedCount = Object.keys(room.votes).length;
+
+    if (votedCount >= aliveCount) {
+      clearTimeout(room.timer);
+      setTimeout(() => resolveVote(room), 800);
+    }
+  });
+
+  // ----- 獵人開槍 -----
+  socket.on('hunter_shoot', payload => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.phase !== 'HUNTER_SHOOT') return;
+    if (socket.id !== room.hunterId) return;
+    clearTimeout(room.timer);
+    hunterShoot(room, (payload && payload.targetId) || null);
+  });
+
+  // ----- 聊天 -----
+  socket.on('chat_send', payload => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room) return;
+    const me = room.players.find(p => p.id === socket.id);
+    if (!me) return;
+
+    const channel = (payload && payload.channel) || 'PUBLIC';
+    const text = String((payload && payload.text) || '').trim().slice(0, 200);
+    if (!text) return;
+
+    const msg = { channel: channel, from: me.name, text: text };
+
+    if (channel === 'WOLF') {
+      if (me.role !== 'WEREWOLF') return;
+      room.players.filter(p => p.role === 'WEREWOLF')
+        .forEach(p => io.to(p.id).emit('chat_message', msg));
+      return;
+    }
+    if (channel === 'DEAD') {
+      if (me.alive) return;
+      room.players.filter(p => !p.alive)
+        .forEach(p => io.to(p.id).emit('chat_message', msg));
+      return;
+    }
+    io.to(room.roomId).emit('chat_message', {
+      channel: 'PUBLIC', from: me.name, text: text
+    });
+  });
+});
+
+// ============================================================
+// 啟動伺服器
+// ============================================================
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log('🐺 狼人殺伺服器已啟動，port = ' + PORT);
+});
