@@ -271,7 +271,6 @@ function scheduleAiActions(room, phase) {
     ais.filter(p => p.role === 'WEREWOLF').forEach((ai, idx) => {
       setTimeout(() => {
         if (room.phase !== 'NIGHT_WOLF' || !ai.alive) return;
-        // 若已有人類投票，AI 會立刻跟隨（不重複覆蓋）
         const humanWolves = room.players.filter(p => p.role === 'WEREWOLF' && p.alive && !p.isAI);
         const humanVoted = humanWolves.some(w => room.wolfVotes[w.id]);
         if (humanVoted) {
@@ -765,7 +764,6 @@ io.on('connection', socket => {
       room.wolfVotes[ai.id] = targetId;
     });
 
-    // 通知所有狼人
     wolves.forEach(w => {
       if (w.isAI) return;
       const mateVotes = {};
