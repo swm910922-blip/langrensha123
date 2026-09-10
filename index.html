@@ -119,6 +119,7 @@ input{font-family:inherit}
 .chat-tab.active{background:rgba(124,156,255,.15);color:var(--accent);border-color:rgba(124,156,255,.35)}
 .chat-tab.wolf.active{background:rgba(239,68,68,.15);color:var(--wolf);border-color:rgba(239,68,68,.4)}
 .chat-tab.evil.active{background:rgba(244,114,182,.15);color:var(--sniper);border-color:rgba(244,114,182,.4)}
+.chat-tab.police.active{background:rgba(34,211,238,.15);color:var(--doctor);border-color:rgba(34,211,238,.4)}
 .chat-msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12.5px;min-height:80px}
 .msg{line-height:1.5;word-break:break-word}
 .msg .who{font-weight:700;margin-right:6px;color:var(--accent)}
@@ -389,7 +390,8 @@ function BoardView(){
           <div class="chat-tabs">
             <button class="chat-tab ${state.chatTab==='PUBLIC'?'active':''}" data-tab="PUBLIC">🌐 公開</button>
             ${state.myRole==='WEREWOLF' ? `<button class="chat-tab wolf ${state.chatTab==='WOLF'?'active':''}" data-tab="WOLF">🐺 狼隊</button>`:''}
-            ${state.myRole==='SNIPER' ? `<button class="chat-tab evil ${state.chatTab==='EVIL'?'active':''}" data-tab="EVIL">🎯 邪惡</button>`:''}
+                        ${state.myRole==='SNIPER' ? `<button class="chat-tab evil ${state.chatTab==='EVIL'?'active':''}" data-tab="EVIL">🎯 邪惡</button>`:''}
+            ${state.myRole==='SEER' ? `<button class="chat-tab police ${state.chatTab==='POLICE'?'active':''}" data-tab="POLICE">🔮 警察</button>`:''}
             ${!me?.alive ? `<button class="chat-tab ${state.chatTab==='DEAD'?'active':''}" data-tab="DEAD">💀 亡者</button>`:''}
           </div>
           <div class="chat-msgs">
@@ -698,7 +700,7 @@ socket.on('game_started', ({ myRole, players, doctorShots, sniperShots }) => {
   state.sniperShotsLeft = sniperShots || 0;
   state.screen = 'board';
   state.chats = { PUBLIC: [], WOLF: [], EVIL: [], DEAD: [] };
-  state.chatTab = myRole === 'WEREWOLF' ? 'WOLF' : myRole === 'SNIPER' ? 'EVIL' : 'PUBLIC';
+   state.chatTab = myRole === 'WEREWOLF' ? 'WOLF' : myRole === 'SNIPER' ? 'EVIL' : myRole === 'SEER' ? 'POLICE' : 'PUBLIC';
   state.teammateVotes = {};
   render();
   const info = ROLE_INFO[myRole];
@@ -716,7 +718,7 @@ socket.on('phase_changed', payload => {
     if(state.myRole === 'SNIPER') state.sniperShotsLeft = state.phaseData.shotsLeft;
   }
 
-  if(payload.phase.startsWith('DAY') && (state.chatTab === 'WOLF' || state.chatTab === 'EVIL')) {
+   if(payload.phase.startsWith('DAY') && (state.chatTab === 'WOLF' || state.chatTab === 'EVIL')) {
     state.chatTab = 'PUBLIC';
   }
   if(state.screen !== 'board') state.screen = 'board';
