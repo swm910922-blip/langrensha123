@@ -280,9 +280,15 @@ function RoomView(){
         </div>
       `).join('')}
     </div>
-    <div style="margin-top:28px;max-width:320px">
+        <div style="margin-top:28px;max-width:400px">
       ${state.isHost
-        ? `<button class="btn gold" id="btn-start" ${state.players.length<6?'disabled':''}>
+        ? `<div style="display:flex;gap:8px;margin-bottom:12px">
+             <button class="btn ghost" id="btn-add-ai" ${state.players.length>=12?'disabled':''}>＋ 新增 AI 玩家</button>
+             ${state.players.some(p=>p.isAI)
+               ? `<button class="btn ghost" id="btn-remove-ai" style="flex:0 0 auto;width:auto;padding:13px 16px">移除最後一個 AI</button>`
+               : ''}
+           </div>
+           <button class="btn gold" id="btn-start" ${state.players.length<6?'disabled':''}>
              開始遊戲 ${state.players.length<6?`（還需 ${6-state.players.length} 人）`:''}
            </button>`
         : `<div class="hint">等待房主開始遊戲…</div>`}
@@ -295,6 +301,21 @@ function RoomView(){
   el.querySelector('#btn-leave')?.addEventListener('click', () => {
     if(!confirm('確定要離開房間嗎？')) return;
     leaveRoom();
+  });
+    el.querySelector('#btn-add-ai')?.addEventListener('click', () => {
+    socket.emit('add_ai_player', {}, res => {
+      if(!res?.ok) alert(res?.error || '新增 AI 失敗');
+    });
+  });
+
+  el.querySelector('#btn-remove-ai')?.addEventListener('click', () => {
+    // 找最後一個 AI
+    const aiPlayers = state.players.filter(p => p.isAI);
+    if(!aiPlayers.length) return;
+    const lastAi = aiPlayers[aiPlayers.length - 1];
+    socket.emit('remove_ai_player', { playerId: lastAi.id }, res => {
+      if(!res?.ok) alert(res?.error || '移除 AI 失敗');
+    });
   });
   el.querySelector('#btn-start')?.addEventListener('click', () => {
     socket.emit('start_game', {}, res => { if(!res?.ok) alert(res?.error || '無法開始'); });
@@ -437,8 +458,12 @@ function playerCard(p){
       ${checkMark ? `<span class="votebadge" style="right:auto;left:6px;background:${checkMark==='WOLF'?'var(--wolf)':'var(--good)'}">${checkMark==='WOLF'?'🐺':'✅'}</span>` : ''}
       <div class="avatar">${p.name.slice(0,1).toUpperCase()}</div>
       <div class="pname">${p.name}</div>
-      <div class="pmeta">${p.alive ? (p.isHost?'房主':'') : '已出局'}</div>
-    </div>
+            <div class="pmeta">${
+        !p.alive ? '已出局'
+        : p.isHost ? '房主'
+        : p.isAI ? '🤖 AI'
+        : ''
+      }</div>
   `;
 }
 
