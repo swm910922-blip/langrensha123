@@ -1,12 +1,522 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-TW">
 <head>
-  <meta charset="UTF-8">
-  <title>我的第一個網頁</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>狼人殺 · 展示版</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#151a24; --panel-2:#1c2230; --line:#2a3345;
+    --text:#e6ecf5; --muted:#8b98ad; --good:#4ade80; --wolf:#f87171;
+    --accent:#7c9cff; --gold:#f5c451;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:radial-gradient(1200px 800px at 50% -10%,#1b2436 0%,var(--bg) 60%);
+    color:var(--text);font-family:-apple-system,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
+    min-height:100vh;display:flex;flex-direction:column;
+  }
+  #app{flex:1;display:flex;flex-direction:column}
+  button{font-family:inherit;cursor:pointer;border:none;border-radius:10px;transition:.15s}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  input{font-family:inherit}
+
+  .lobby{flex:1;display:flex;align-items:center;justify-content:center;padding:20px}
+  .lobby-card{
+    width:min(420px,92vw);background:var(--panel);border:1px solid var(--line);
+    border-radius:20px;padding:36px 32px;box-shadow:0 24px 60px rgba(0,0,0,.5);
+  }
+  .lobby-card h1{
+    font-size:26px;letter-spacing:4px;text-align:center;margin-bottom:8px;
+    background:linear-gradient(90deg,#7c9cff,#f5c451);-webkit-background-clip:text;
+    -webkit-text-fill-color:transparent;
+  }
+  .sub{text-align:center;color:var(--muted);font-size:12px;margin-bottom:28px;letter-spacing:1px}
+  .field{margin-bottom:16px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px;letter-spacing:1px}
+  .field input{
+    width:100%;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);
+    border-radius:10px;color:var(--text);font-size:15px;outline:none;transition:.15s;
+  }
+  .field input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,156,255,.15)}
+  .btn{width:100%;padding:13px;font-size:15px;font-weight:600;letter-spacing:1px;color:#fff;
+    background:linear-gradient(135deg,#4a6bff,#7c9cff);}
+  .btn:hover:not(:disabled){filter:brightness(1.1)}
+  .btn.ghost{background:var(--panel-2);border:1px solid var(--line);color:var(--text)}
+  .btn.wolf{background:linear-gradient(135deg,#b91c1c,#ef4444)}
+  .btn.good{background:linear-gradient(135deg,#15803d,#4ade80)}
+  .btn.gold{background:linear-gradient(135deg,#b8860b,#f5c451);color:#241a00}
+  .hint{font-size:12px;color:var(--muted);text-align:center;margin-top:16px;line-height:1.7}
+
+  .room{padding:24px;flex:1;overflow-y:auto}
+  .room-head{
+    display:flex;justify-content:space-between;align-items:center;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 22px;margin-bottom:20px;
+  }
+  .room-code{font-size:12px;color:var(--muted);letter-spacing:2px}
+  .room-code b{color:var(--gold);font-size:22px;letter-spacing:6px;display:block;margin-top:4px}
+  .players-wait{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+  .pw{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;text-align:center;font-size:14px;}
+  .pw .dot{width:8px;height:8px;border-radius:50%;background:var(--good);display:inline-block;margin-right:6px}
+  .pw.host{border-color:var(--gold)}
+  .pw .tag{font-size:11px;color:var(--gold);display:block;margin-top:6px;letter-spacing:1px}
+
+  .board{flex:1;display:flex;flex-direction:column;gap:12px;padding:14px;overflow:hidden}
+  .statusbar{
+    display:flex;align-items:center;gap:20px;padding:14px 22px;
+    background:linear-gradient(90deg,var(--panel-2),var(--panel));
+    border:1px solid var(--line);border-radius:14px;
+  }
+  .phase-badge{
+    padding:6px 16px;border-radius:99px;font-size:13px;font-weight:700;letter-spacing:1px;
+    background:rgba(124,156,255,.15);color:var(--accent);border:1px solid rgba(124,156,255,.3);
+  }
+  .phase-badge.night{background:rgba(88,101,242,.15);color:#93a5ff;border-color:rgba(88,101,242,.4)}
+  .phase-badge.day{background:rgba(245,196,81,.15);color:var(--gold);border-color:rgba(245,196,81,.4)}
+  .sb-title{font-size:16px;font-weight:600;letter-spacing:1px}
+  .sb-sub{font-size:12px;color:var(--muted);margin-top:3px}
+  .timer{margin-left:auto;font-size:30px;font-weight:800;font-variant-numeric:tabular-nums;
+    color:var(--accent);min-width:64px;text-align:right}
+  .myrole{
+    display:flex;align-items:center;gap:10px;padding:8px 16px;border-radius:10px;
+    background:var(--panel-2);border:1px solid var(--line);font-size:13px;
+  }
+  .myrole .rname{font-weight:700;letter-spacing:1px}
+  .myrole.good .rname{color:var(--good)}
+  .myrole.wolf .rname{color:var(--wolf)}
+
+  .main{flex:1;display:flex;gap:12px;min-height:0;flex-wrap:wrap}
+  .grid-wrap{flex:1;min-width:280px;overflow-y:auto}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px}
+  .pcard{
+    position:relative;background:var(--panel);border:2px solid var(--line);border-radius:14px;
+    padding:14px 8px;text-align:center;transition:.18s;
+  }
+  .pcard .avatar{
+    width:46px;height:46px;border-radius:50%;margin:0 auto 8px;
+    display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700;
+    background:linear-gradient(135deg,#3b4a6b,#2a3345);color:#cfd8e8;
+  }
+  .pcard .pname{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pcard .pmeta{font-size:10px;color:var(--muted);margin-top:4px;letter-spacing:.5px;min-height:13px}
+  .pcard.dead{opacity:.32;filter:grayscale(1)}
+  .pcard.dead::after{
+    content:'☠';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    font-size:40px;color:#ff6b6b;opacity:.85;
+  }
+  .pcard.me{border-color:var(--accent)}
+  .pcard.me .pname::after{content:' (你)';color:var(--accent);font-size:11px}
+  .pcard.selectable{cursor:pointer;border-color:rgba(245,196,81,.5)}
+  .pcard.selectable:hover{transform:translateY(-3px);border-color:var(--gold);box-shadow:0 8px 20px rgba(245,196,81,.15)}
+  .pcard.selected{border-color:var(--gold);background:rgba(245,196,81,.09)}
+  .pcard .votebadge{
+    position:absolute;top:6px;right:6px;background:var(--gold);color:#241a00;
+    border-radius:99px;padding:1px 7px;font-size:11px;font-weight:800;
+  }
+
+  .sidebar{width:290px;display:flex;flex-direction:column;gap:12px;flex-shrink:0}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;display:flex;flex-direction:column}
+  .panel h3{font-size:12px;color:var(--muted);letter-spacing:2px;margin-bottom:10px;font-weight:600}
+  .action-panel .title{font-size:14px;font-weight:700;margin-bottom:8px;color:var(--gold)}
+  .action-panel .desc{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:12px}
+  .action-panel .btns{display:flex;flex-direction:column;gap:8px}
+  .action-panel .btns .btn{padding:10px;font-size:13px}
+
+  .chat{flex:1;min-height:200px}
+  .chat-tabs{display:flex;gap:6px;margin-bottom:10px}
+  .chat-tab{
+    flex:1;padding:6px 4px;font-size:11px;border-radius:8px;background:var(--panel-2);
+    color:var(--muted);border:1px solid transparent;letter-spacing:.5px;
+  }
+  .chat-tab.active{background:rgba(124,156,255,.15);color:var(--accent);border-color:rgba(124,156,255,.35)}
+  .chat-tab.wolf.active{background:rgba(239,68,68,.15);color:var(--wolf);border-color:rgba(239,68,68,.4)}
+  .chat-msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12.5px;min-height:80px}
+  .msg{line-height:1.5;word-break:break-word}
+  .msg .who{font-weight:700;margin-right:6px;color:var(--accent)}
+  .msg.system{color:var(--muted);font-style:italic;font-size:11.5px}
+  .chat-input{display:flex;gap:6px;margin-top:10px}
+  .chat-input input{
+    flex:1;padding:9px 12px;background:var(--panel-2);border:1px solid var(--line);
+    border-radius:9px;color:var(--text);font-size:13px;outline:none;
+  }
+  .chat-input button{padding:0 16px;background:var(--accent);color:#fff;font-size:13px;font-weight:600}
+
+  .judge-bar{
+    position:fixed;bottom:26px;left:50%;transform:translateX(-50%);
+    background:linear-gradient(135deg,rgba(21,26,36,.97),rgba(28,34,48,.97));
+    border:1px solid var(--gold);border-radius:14px;padding:14px 28px;
+    font-size:15px;letter-spacing:1px;color:var(--gold);z-index:90;
+    box-shadow:0 12px 40px rgba(245,196,81,.18);
+    max-width:80vw;text-align:center;
+    animation:slideUp .35s ease;
+  }
+  @keyframes slideUp{from{opacity:0;transform:translate(-50%,14px)}}
+
+  @media(max-width:900px){
+    .main{flex-direction:column}
+    .sidebar{width:100%}
+  }
+</style>
 </head>
-<body style="background:#0b0e14; color:#7c9cff; font-family:sans-serif; text-align:center; padding-top:100px;">
-  <h1>🎉 成功了！</h1>
-  <p>這是我的第一個上線網頁</p>
-  <p>狼人殺遊戲即將登場 🐺</p>
+<body>
+<div id="app"></div>
+
+<script>
+/* =========================================================
+   這是「展示版」前端 — 不需要後端也能看到完整畫面
+   ========================================================= */
+
+// 模擬玩家名單
+const MOCK_PLAYERS = [
+  { id:'p1', name:'小明',   alive:true,  isHost:true,  role:'WEREWOLF' },
+  { id:'p2', name:'阿華',   alive:true,  isHost:false, role:'SEER' },
+  { id:'p3', name:'小美',   alive:true,  isHost:false, role:'WITCH' },
+  { id:'p4', name:'大雄',   alive:true,  isHost:false, role:'HUNTER' },
+  { id:'p5', name:'胖虎',   alive:false, isHost:false, role:'VILLAGER' },
+  { id:'p6', name:'靜香',   alive:true,  isHost:false, role:'VILLAGER' },
+];
+
+const ROLE_INFO = {
+  WEREWOLF: { name:'狼人',   camp:'wolf', desc:'每晚與同伴共同商議刺殺一名玩家。隱藏身份，白天誤導好人。' },
+  SEER:     { name:'預言家', camp:'good', desc:'每晚可查驗一名玩家的陣營（好人 / 狼人）。' },
+  WITCH:    { name:'女巫',   camp:'good', desc:'擁有一瓶解藥與一瓶毒藥，全場各限用一次。' },
+  HUNTER:   { name:'獵人',   camp:'good', desc:'被狼人殺死或被投票放逐時，可開槍帶走一名玩家。' },
+  VILLAGER: { name:'平民',   camp:'good', desc:'沒有夜間技能，白天靠推理與投票找出狼人。' },
+};
+
+let screen = 'lobby';       // lobby | room | board
+let roomId = '';
+let myId = 'p1';
+let myRole = 'WEREWOLF';
+let phase = 'NIGHT_WOLF';   // NIGHT_WOLF | NIGHT_SEER | NIGHT_WITCH | DAY_ANNOUNCE | DAY_DISCUSS | DAY_VOTE
+let day = 1;
+let selectedTarget = null;
+let chatTab = 'WOLF';
+let chats = {
+  PUBLIC: [
+    { from:'系統', text:'遊戲開始，正在發放身分牌…', system:true },
+    { from:'系統', text:'第 1 夜降臨，天黑請閉眼。', system:true },
+  ],
+  WOLF: [
+    { from:'系統', text:'狼隊頻道 — 只有狼人能看見。', system:true },
+    { from:'小明', text:'今晚先殺預言家？' },
+    { from:'阿華', text:'我覺得先殺女巫比較穩。' },
+  ],
+};
+
+const app = document.getElementById('app');
+
+function render(){
+  app.innerHTML = '';
+  if(screen === 'lobby')      app.appendChild(LobbyView());
+  else if(screen === 'room')  app.appendChild(RoomView());
+  else                        app.appendChild(BoardView());
+}
+
+/* ---------- 大廳 ---------- */
+function LobbyView(){
+  const el = document.createElement('div');
+  el.className = 'lobby';
+  el.innerHTML = `
+    <div class="lobby-card">
+      <h1>狼 人 殺</h1>
+      <div class="sub">6–12 人 · 即時連線 · 語音法官</div>
+
+      <div class="field">
+        <label>你的暱稱</label>
+        <input id="nick" maxlength="12" placeholder="輸入暱稱…" value="小明" />
+      </div>
+
+      <button class="btn" id="btn-create">建立房間（展示）</button>
+
+      <div class="field" style="margin-top:16px">
+        <label>房間邀請碼</label>
+        <input id="roomcode" maxlength="6" placeholder="6 碼房間號" style="text-transform:uppercase;letter-spacing:4px;text-align:center" />
+      </div>
+      <button class="btn ghost" id="btn-join">加入房間（展示）</button>
+
+      <div class="hint">
+        ⚠️ 目前為展示模式，按鈕僅模擬畫面<br/>
+        正式連線功能需搭配後端伺服器
+      </div>
+    </div>
+  `;
+  el.querySelector('#btn-create').onclick = ()=>{
+    roomId = 'ABC123';
+    screen = 'room';
+    render();
+  };
+  el.querySelector('#btn-join').onclick = ()=>{
+    roomId = (el.querySelector('#roomcode').value || 'ABC123').toUpperCase();
+    screen = 'room';
+    render();
+  };
+  return el;
+}
+
+/* ---------- 房間 ---------- */
+function RoomView(){
+  const el = document.createElement('div');
+  el.className = 'room';
+  el.innerHTML = `
+    <div class="room-head">
+      <div class="room-code">房間邀請碼<b>${roomId}</b></div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span style="font-size:13px;color:var(--muted)">${MOCK_PLAYERS.length} / 12 人</span>
+        <button class="btn ghost" id="btn-leave" style="width:auto;padding:9px 18px">離開</button>
+      </div>
+    </div>
+
+    <div class="players-wait">
+      ${MOCK_PLAYERS.map(p=>`
+        <div class="pw ${p.isHost?'host':''}">
+          <div><span class="dot"></span>${p.name}</div>
+          ${p.isHost?'<span class="tag">房主</span>':''}
+        </div>
+      `).join('')}
+    </div>
+
+    <div style="margin-top:28px;max-width:320px">
+      <button class="btn gold" id="btn-start">開始遊戲（展示）</button>
+    </div>
+
+    <div class="hint" style="text-align:left;margin-top:20px">
+      展示模式：點「開始遊戲」會直接進入遊戲盤面
+    </div>
+  `;
+  el.querySelector('#btn-leave').onclick = ()=>{ screen='lobby'; render(); };
+  el.querySelector('#btn-start').onclick = ()=>{ screen='board'; render(); };
+  return el;
+}
+
+/* ---------- 遊戲盤面 ---------- */
+function BoardView(){
+  const me = MOCK_PLAYERS.find(p=>p.id===myId);
+  const isNight = phase.startsWith('NIGHT');
+
+  const el = document.createElement('div');
+  el.className = 'board';
+  el.innerHTML = `
+    <div class="statusbar">
+      <div class="phase-badge ${isNight?'night':'day'}">${phaseLabel(phase)}</div>
+      <div>
+        <div class="sb-title">${phaseTitle(phase)}</div>
+        <div class="sb-sub">${phaseSub(phase)}</div>
+      </div>
+      <div class="myrole ${ROLE_INFO[myRole].camp}">
+        <span style="color:var(--muted);font-size:11px">你的身分</span>
+        <span class="rname">${ROLE_INFO[myRole].name}</span>
+      </div>
+      <div class="timer">24</div>
+    </div>
+
+    <div class="main">
+      <div class="grid-wrap">
+        <div class="grid">
+          ${MOCK_PLAYERS.map(p=>playerCard(p, me)).join('')}
+        </div>
+      </div>
+
+      <div class="sidebar">
+        <div class="panel action-panel">
+          ${actionPanelHTML()}
+        </div>
+
+        <div class="panel chat">
+          <div class="chat-tabs">
+            <button class="chat-tab ${chatTab==='PUBLIC'?'active':''}" data-tab="PUBLIC">🌐 公開</button>
+            <button class="chat-tab wolf ${chatTab==='WOLF'?'active':''}" data-tab="WOLF">🐺 狼隊</button>
+          </div>
+          <div class="chat-msgs">
+            ${(chats[chatTab]||[]).map(m=>`
+              ${m.system
+                ? `<div class="msg system">${m.text}</div>`
+                : `<div class="msg"><span class="who">${m.from}：</span>${m.text}</div>`}
+            `).join('')}
+          </div>
+          <div class="chat-input">
+            <input placeholder="輸入訊息…" />
+            <button>送出</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="judge-bar">🎙 ${judgeSpeech()}</div>
+  `;
+
+  // 玩家卡片點擊
+  el.querySelectorAll('.pcard.selectable').forEach(card=>{
+    card.onclick = ()=>{
+      const id = card.dataset.pid;
+      selectedTarget = (selectedTarget === id) ? null : id;
+      render();
+    };
+  });
+
+  // 切換聊天分頁
+  el.querySelectorAll('.chat-tab').forEach(tab=>{
+    tab.onclick = ()=>{ chatTab = tab.dataset.tab; render(); };
+  });
+
+  // 階段切換按鈕（展示用）
+  el.querySelectorAll('[data-phase]').forEach(btn=>{
+    btn.onclick = ()=>{ phase = btn.dataset.phase; selectedTarget=null; render(); };
+  });
+
+  return el;
+}
+
+function phaseLabel(p){
+  const m = {
+    NIGHT_WOLF:'夜晚', NIGHT_SEER:'夜晚', NIGHT_WITCH:'夜晚',
+    DAY_ANNOUNCE:'白天', DAY_DISCUSS:'白天', DAY_VOTE:'投票',
+  };
+  return m[p] || p;
+}
+
+function phaseTitle(p){
+  const m = {
+    NIGHT_WOLF:`第 ${day} 夜 · 狼人請睜眼`,
+    NIGHT_SEER:`第 ${day} 夜 · 預言家請睜眼`,
+    NIGHT_WITCH:`第 ${day} 夜 · 女巫請睜眼`,
+    DAY_ANNOUNCE:`第 ${day} 天 · 天亮了`,
+    DAY_DISCUSS:`第 ${day} 天 · 輪流發言`,
+    DAY_VOTE:`第 ${day} 天 · 投票放逐`,
+  };
+  return m[p] || p;
+}
+
+function phaseSub(p){
+  const m = {
+    NIGHT_WOLF:'狼人之間可在此階段討論，選定今晚的目標',
+    NIGHT_SEER:'選擇一名玩家查驗其陣營',
+    NIGHT_WITCH:'查看今晚的刀口，決定是否使用解藥或毒藥',
+    DAY_ANNOUNCE:'昨晚有人倒牌…',
+    DAY_DISCUSS:'依序發言，找出潛藏的狼人',
+    DAY_VOTE:'點擊玩家頭像投票，最高票者出局',
+  };
+  return m[p] || '';
+}
+
+function judgeSpeech(){
+  const m = {
+    NIGHT_WOLF:`天黑請閉眼。第 ${day} 夜，狼人請睜眼。`,
+    NIGHT_SEER:'狼人請閉眼。預言家請睜眼，請選擇一名玩家查驗。',
+    NIGHT_WITCH:'預言家請閉眼。女巫請睜眼，今晚是否要用藥？',
+    DAY_ANNOUNCE:`天亮了。昨晚，胖虎 倒牌了。`,
+    DAY_DISCUSS:'請玩家依序發言。',
+    DAY_VOTE:'發言結束，請所有玩家投票。',
+  };
+  return m[phase] || '';
+}
+
+function playerCard(p, me){
+  const isSelectable = p.alive && p.id !== myId && (
+    (phase === 'NIGHT_WOLF' && myRole === 'WEREWOLF') ||
+    (phase === 'NIGHT_SEER' && myRole === 'SEER') ||
+    (phase === 'DAY_VOTE')
+  );
+  const isSelected = selectedTarget === p.id;
+  const isMe = p.id === myId;
+
+  return `
+    <div class="pcard ${p.alive?'':'dead'} ${isMe?'me':''} ${isSelectable?'selectable':''} ${isSelected?'selected':''}"
+         data-pid="${p.id}">
+      <div class="avatar">${p.name.slice(0,1).toUpperCase()}</div>
+      <div class="pname">${p.name}</div>
+      <div class="pmeta">${p.alive ? (p.isHost?'房主':'') : '已出局'}</div>
+    </div>
+  `;
+}
+
+function actionPanelHTML(){
+  if(phase === 'NIGHT_WOLF'){
+    return `
+      <div class="title">🐺 狼人行動</div>
+      <div class="desc">同伴：阿華<br/>點擊玩家頭像選擇刺殺目標，多狼需統一意見。</div>
+      <div class="btns">
+        <button class="btn wolf" ${selectedTarget?'':'disabled'}>
+          ${selectedTarget ? '確認刺殺' : '請先選擇目標'}
+        </button>
+      </div>
+    `;
+  }
+  if(phase === 'NIGHT_SEER'){
+    return `
+      <div class="title">🔮 預言家查驗</div>
+      <div class="desc">點擊玩家頭像查驗陣營。</div>
+      <div class="btns">
+        <button class="btn good" ${selectedTarget?'':'disabled'}>
+          ${selectedTarget ? '查驗' : '請先選擇目標'}
+        </button>
+      </div>
+    `;
+  }
+  if(phase === 'NIGHT_WITCH'){
+    return `
+      <div class="title">🧪 女巫用藥</div>
+      <div class="desc">昨晚 <b style="color:var(--wolf)">胖虎</b> 被狼人殺害。<br/>解藥：✅　毒藥：✅</div>
+      <div class="btns">
+        <button class="btn good">使用解藥救 胖虎</button>
+        <button class="btn wolf">使用毒藥</button>
+        <button class="btn ghost">不使用藥水</button>
+      </div>
+    `;
+  }
+  if(phase === 'DAY_VOTE'){
+    return `
+      <div class="title">🗳 投票放逐</div>
+      <div class="desc">點擊玩家頭像投票，最高票者將被放逐。</div>
+      <div class="btns">
+        <button class="btn gold" ${selectedTarget?'':'disabled'}>
+          ${selectedTarget ? '確認投票' : '請先選擇目標'}
+        </button>
+        <button class="btn ghost">棄票</button>
+      </div>
+    `;
+  }
+  if(phase === 'DAY_DISCUSS'){
+    return `
+      <div class="title">💬 發言階段</div>
+      <div class="desc">輪到你發言了，請在公開頻道說明你的推理。</div>
+    `;
+  }
+  return `<div class="desc">☀️ 天亮了，正在公布昨夜結果…</div>`;
+}
+
+/* ---------- 展示用：右下角加一個階段切換器 ---------- */
+function addPhaseSwitcher(){
+  const old = document.querySelector('.phase-switcher');
+  if(old) old.remove();
+  if(screen !== 'board') return;
+
+  const box = document.createElement('div');
+  box.className = 'phase-switcher';
+  box.style.cssText = `
+    position:fixed;bottom:14px;right:14px;background:var(--panel-2);
+    border:1px solid var(--line);border-radius:12px;padding:10px 12px;z-index:100;
+    display:flex;gap:6px;flex-wrap:wrap;max-width:260px;
+  `;
+  box.innerHTML = `
+    <div style="font-size:10px;color:var(--muted);width:100%;margin-bottom:4px">展示模式：切換階段</div>
+    ${['NIGHT_WOLF','NIGHT_SEER','NIGHT_WITCH','DAY_ANNOUNCE','DAY_DISCUSS','DAY_VOTE']
+      .map(p=>`<button class="btn ghost" data-phase="${p}" style="width:auto;padding:5px 9px;font-size:11px">${phaseLabel(p)}</button>`)
+      .join('')}
+    <button class="btn ghost" id="back-room" style="width:auto;padding:5px 9px;font-size:11px;margin-left:auto">回房間</button>
+  `;
+  document.body.appendChild(box);
+
+  box.querySelectorAll('[data-phase]').forEach(b=>{
+    b.onclick = ()=>{ phase = b.dataset.phase; selectedTarget=null; render(); addPhaseSwitcher(); };
+  });
+  box.querySelector('#back-room').onclick = ()=>{ screen='room'; render(); addPhaseSwitcher(); };
+}
+
+const _origRender = render;
+render = function(){ _origRender(); addPhaseSwitcher(); };
+
+render();
+</script>
 </body>
 </html>
