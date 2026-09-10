@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>狼人殺 · 線上版</title>
+<title>狼人殺 · 線上版（無女巫）</title>
 <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <style>
   :root{
@@ -162,15 +162,14 @@
 <div id="app"></div>
 
 <script>
-// ⚠️ 這裡填入你的後端網址
+// ⚠️ 你的後端網址
 const SERVER_URL = 'https://werewolf-server-jmaa.onrender.com';
 const socket = io(SERVER_URL, { transports: ['websocket', 'polling'] });
 
 const ROLE_INFO = {
   WEREWOLF: { name:'狼人',   camp:'wolf', desc:'每晚與同伴共同商議刺殺一名玩家。' },
   SEER:     { name:'預言家', camp:'good', desc:'每晚可查驗一名玩家的陣營。' },
-  WITCH:    { name:'女巫',   camp:'good', desc:'擁有一瓶解藥與一瓶毒藥，全場各限用一次。' },
-  HUNTER:   { name:'獵人',   camp:'good', desc:'被狼人殺死或被投票放逐時，可開槍帶走一名玩家。' },
+  HUNTER:   { name:'獵人',   camp:'good', desc:'死亡時（被狼人殺或被投票放逐）可開槍帶走一名玩家。' },
   VILLAGER: { name:'平民',   camp:'good', desc:'沒有夜間技能，白天靠推理與投票找出狼人。' },
 };
 
@@ -189,6 +188,7 @@ let state = {
   chats: { PUBLIC: [], WOLF: [], DEAD: [] },
   chatTab: 'PUBLIC',
   gameOver: null,
+  endsAt: null,
 };
 
 const app = document.getElementById('app');
@@ -201,6 +201,23 @@ function render(){
   if(state.gameOver) app.appendChild(GameOverModal());
 }
 
+/* ---------- 離開房間的共用邏輯 ---------- */
+function leaveRoom(){
+  socket.emit('leave_room');
+  state.screen = 'lobby';
+  state.roomId = null;
+  state.players = [];
+  state.isHost = false;
+  state.phase = 'LOBBY';
+  state.myRole = null;
+  state.gameOver = null;
+  state.selectedTarget = null;
+  state.myVote = null;
+  state.phaseData = {};
+  state.chats = { PUBLIC: [], WOLF: [], DEAD: [] };
+  render();
+}
+
 /* ---------- 大廳 ---------- */
 function LobbyView(){
   const el = document.createElement('div');
@@ -208,7 +225,7 @@ function LobbyView(){
   el.innerHTML = `
     <div class="lobby-card">
       <h1>狼 人 殺</h1>
-      <div class="sub">6–12 人 · 即時連線</div>
+      <div class="sub">6–12 人 · 即時連線 · 無女巫版</div>
       <div class="field">
         <label>你的暱稱</label>
         <input id="nick" maxlength="12" placeholder="輸入暱稱…" />
@@ -275,7 +292,10 @@ function RoomView(){
     navigator.clipboard?.writeText(state.roomId);
     alert('邀請碼已複製：' + state.roomId);
   });
-  el.querySelector('#btn-leave')?.addEventListener('click', () => socket.emit('leave_room'));
+  el.querySelector('#btn-leave')?.addEventListener('click', () => {
+    if(!confirm('確定要離開房間嗎？')) return;
+    leaveRoom();
+  });
   el.querySelector('#btn-start')?.addEventListener('click', () => {
     socket.emit('start_game', {}, res => { if(!res?.ok) alert(res?.error || '無法開始'); });
   });
@@ -302,6 +322,7 @@ function BoardView(){
         <span class="rname">${roleInfo.name}</span>
       </div>` : ''}
       <div class="timer" id="timer">--</div>
+      <button class="btn ghost" id="btn-exit-game" style="width:auto;padding:8px 14px;font-size:12px;margin-left:12px">離開</button>
     </div>
 
     <div class="main">
@@ -353,6 +374,12 @@ function BoardView(){
   el.querySelector('#chat-send').onclick = sendChat;
   chatIn.addEventListener('keydown', e => { if(e.key === 'Enter') sendChat(); });
 
+  // 遊戲中離開按鈕
+  el.querySelector('#btn-exit-game')?.addEventListener('click', () => {
+    if(!confirm('確定要離開遊戲嗎？')) return;
+    leaveRoom();
+  });
+
   bindActionButtons(el);
   startTimer(el.querySelector('#timer'));
   return el;
@@ -360,8 +387,8 @@ function BoardView(){
 
 function phaseLabel(p){
   const m = {
-    LOBBY:'等待中', ROLE_DISTRIBUTION:'發牌', NIGHT_WOLF:'夜晚',
-    NIGHT_SEER:'夜晚', NIGHT_WITCH:'夜晚',
+    LOBBY:'等待中', ROLE_DISTRIBUTION:'發牌',
+    NIGHT_WOLF:'夜晚', NIGHT_SEER:'夜晚',
     DAY_ANNOUNCE:'白天', DAY_DISCUSS:'白天', DAY_VOTE:'投票',
     HUNTER_SHOOT:'技能', GAME_OVER:'結算',
   };
@@ -374,7 +401,6 @@ function phaseTitle(p){
     ROLE_DISTRIBUTION:'正在發放身分牌…',
     NIGHT_WOLF:`第 ${state.day} 夜 · 狼人請睜眼`,
     NIGHT_SEER:`第 ${state.day} 夜 · 預言家請睜眼`,
-    NIGHT_WITCH:`第 ${state.day} 夜 · 女巫請睜眼`,
     DAY_ANNOUNCE:`第 ${state.day} 天 · 天亮了`,
     DAY_DISCUSS:`第 ${state.day} 天 · 輪流發言`,
     DAY_VOTE:`第 ${state.day} 天 · 投票放逐`,
@@ -388,7 +414,6 @@ function phaseSub(p){
   const m = {
     NIGHT_WOLF:'狼人之間可在此階段討論，選定今晚的目標',
     NIGHT_SEER:'選擇一名玩家查驗其陣營',
-    NIGHT_WITCH:'查看今晚的刀口，決定是否使用解藥或毒藥',
     DAY_ANNOUNCE:'昨晚有人倒牌…',
     DAY_DISCUSS:'依序發言，找出潛藏的狼人',
     DAY_VOTE:'點擊玩家頭像投票，最高票者出局',
@@ -421,23 +446,28 @@ function ActionPanelHTML(){
   const d = state.phaseData || {};
   const me = state.players.find(p => p.id === state.myId);
   if(state.phase === 'GAME_OVER') return `<div class="desc">遊戲已結束</div>`;
-  if(!me?.alive) return `<div class="desc">💀 你已出局<br/>可繼續在亡者頻道觀戰</div>`;
+
+  // 獵人已死但仍可開槍的特例
+  const isDeadHunterCanShoot = state.phase === 'HUNTER_SHOOT' && d.hunterId === state.myId;
+  if(!me?.alive && !isDeadHunterCanShoot){
+    return `<div class="desc">💀 你已出局<br/>可繼續在亡者頻道觀戰</div>`;
+  }
 
   switch(state.phase){
     case 'NIGHT_WOLF': {
-      if(state.myRole !== 'WEREWOLF') return `<div class="desc">🌙 天黑請閉眼…</div>`;
+      if(state.myRole !== 'WEREWOLF' || !me?.alive) return `<div class="desc">🌙 天黑請閉眼…</div>`;
       const partner = (d.wolfPartners || []).map(p => p.name).join('、');
       return `
         <div class="title">🐺 狼人行動</div>
         <div class="desc">同伴：${partner || '（無）'}<br/>點擊玩家頭像選擇刺殺目標。</div>
         <div class="btns">
           <button class="btn wolf" data-action="wolf_confirm" ${state.selectedTarget?'':'disabled'}>
-            ${state.selectedTarget ? '確認刺殺' : '請先選擇目標'}
+            ${state.selectedTarget ? '確認刺殺 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
           </button>
         </div>`;
     }
     case 'NIGHT_SEER': {
-      if(state.myRole !== 'SEER') return `<div class="desc">🌙 天黑請閉眼…</div>`;
+      if(state.myRole !== 'SEER' || !me?.alive) return `<div class="desc">🌙 天黑請閉眼…</div>`;
       const checks = d.checks || {};
       const checkedList = Object.entries(checks).map(([id,c]) => `${nameOf(id)}：${c==='WOLF'?'🐺 狼人':'✅ 好人'}`).join('<br/>');
       return `
@@ -446,35 +476,19 @@ function ActionPanelHTML(){
         ${checkedList ? `<div class="desc" style="border-top:1px solid var(--line);padding-top:8px">${checkedList}</div>` : ''}
         <div class="btns">
           <button class="btn good" data-action="seer_confirm" ${state.selectedTarget?'':'disabled'}>
-            ${state.selectedTarget ? '查驗' : '請先選擇目標'}
+            ${state.selectedTarget ? '查驗 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
           </button>
         </div>`;
     }
-    case 'NIGHT_WITCH': {
-      if(state.myRole !== 'WITCH') return `<div class="desc">🌙 天黑請閉眼…</div>`;
-      const killed = d.wolfTargetName;
-      return `
-        <div class="title">🧪 女巫用藥</div>
-        <div class="desc">
-          ${killed ? `昨晚 <b style="color:var(--wolf)">${killed}</b> 被狼人殺害。` : '昨晚是平安夜。'}<br/>
-          解藥：${d.canHeal?'✅ 可用':'❌ 已用/無目標'}　毒藥：${d.canPoison?'✅ 可用':'❌ 已用'}
-        </div>
-        <div class="btns">
-          ${d.canHeal && killed ? `<button class="btn good" data-action="witch_heal">使用解藥救 ${killed}</button>` : ''}
-          ${d.canPoison ? `<button class="btn wolf" data-action="witch_poison" ${state.selectedTarget?'':'disabled'}>
-              ${state.selectedTarget ? '使用毒藥' : '選擇毒殺目標'}
-            </button>` : ''}
-          <button class="btn ghost" data-action="witch_skip">不使用藥水</button>
-        </div>`;
-    }
     case 'DAY_VOTE': {
+      if(!me?.alive) return `<div class="desc">💀 你已出局，無法投票</div>`;
       if(state.myVote) return `<div class="desc">✅ 你已投票給 <b>${nameOf(state.myVote)}</b><br/>等待其他玩家…</div>`;
       return `
         <div class="title">🗳 投票放逐</div>
         <div class="desc">點擊玩家頭像投票，最高票者將被放逐。</div>
         <div class="btns">
           <button class="btn gold" data-action="vote_confirm" ${state.selectedTarget?'':'disabled'}>
-            ${state.selectedTarget ? '確認投票' : '請先選擇目標'}
+            ${state.selectedTarget ? '投票給 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
           </button>
           <button class="btn ghost" data-action="vote_skip">棄票</button>
         </div>`;
@@ -485,10 +499,10 @@ function ActionPanelHTML(){
       if(d.hunterId !== state.myId) return `<div class="desc">等待獵人決定是否開槍…</div>`;
       return `
         <div class="title">🔫 獵人開槍</div>
-        <div class="desc">你已出局，可帶走一名玩家。點擊頭像選擇目標。</div>
+        <div class="desc">你已出局，可帶走一名玩家。點擊頭像選擇目標，或放棄開槍。</div>
         <div class="btns">
           <button class="btn wolf" data-action="hunter_shoot" ${state.selectedTarget?'':'disabled'}>
-            ${state.selectedTarget ? '開槍帶走' : '請先選擇目標'}
+            ${state.selectedTarget ? '開槍帶走 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
           </button>
           <button class="btn ghost" data-action="hunter_skip">放棄開槍</button>
         </div>`;
@@ -516,9 +530,6 @@ function bindActionButtons(root){
       switch(a){
         case 'wolf_confirm':   socket.emit('wolf_kill',   { targetId: t }); break;
         case 'seer_confirm':   socket.emit('seer_check',  { targetId: t }); break;
-        case 'witch_heal':     socket.emit('witch_action',{ action:'HEAL' }); break;
-        case 'witch_poison':   socket.emit('witch_action',{ action:'POISON', targetId: t }); break;
-        case 'witch_skip':     socket.emit('witch_action',{ action:'SKIP' }); break;
         case 'vote_confirm':   state.myVote = t; socket.emit('day_vote', { targetId: t }); break;
         case 'vote_skip':      state.myVote = null; socket.emit('day_vote', { targetId: null }); break;
         case 'hunter_shoot':   socket.emit('hunter_shoot',{ targetId: t }); break;
@@ -564,15 +575,22 @@ function GameOverModal(){
             </span>
           </div>`).join('')}
       </div>
-      <button class="btn" id="back-lobby" style="margin-top:20px">回到房間</button>
+      <div style="display:flex;gap:10px;margin-top:20px">
+        <button class="btn ghost" id="back-room">回到房間</button>
+        <button class="btn" id="back-lobby">離開到大廳</button>
+      </div>
     </div>
   `;
-  el.querySelector('#back-lobby').onclick = () => {
+  el.querySelector('#back-room').onclick = () => {
     state.gameOver = null;
     state.screen = 'room';
     state.phase = 'LOBBY';
     render();
     socket.emit('return_to_lobby');
+  };
+  el.querySelector('#back-lobby').onclick = () => {
+    state.gameOver = null;
+    leaveRoom();
   };
   return el;
 }
