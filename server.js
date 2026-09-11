@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v11.3
+// 狼人殺後端 v11.4（整合修正版）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -38,9 +38,9 @@ const GROQ_MODEL_CANDIDATES = [
 ];
 
 const GEMINI_MODEL_CANDIDATES = [
-  'gemini-3.1-flash-lite',      // ✅ 最穩、最快
-  'gemini-3.5-flash',           // ✅ 次穩
-  'gemini-3.6-flash',           // ✅ 品質最好
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash',
+  'gemini-3.6-flash',
   'gemini-flash-latest',
   'gemini-flash-lite-latest',
 ];
@@ -312,7 +312,6 @@ async function callGemini(messages, maxTokens) {
     generationConfig: {
       maxOutputTokens: maxTokens,
       temperature: 0.9,
-      // ✅ 關閉思考模式（3.x 推理模型適用），避免吃掉 token
       thinkingConfig: { thinkingBudget: 0 }
     }
   };
@@ -325,7 +324,6 @@ async function callGemini(messages, maxTokens) {
 
   for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
     const controller = new AbortController();
-    // ✅ 從 30 秒 → 45 秒
     const timeout = setTimeout(() => controller.abort(), 45000);
 
     try {
@@ -353,7 +351,6 @@ async function callGemini(messages, maxTokens) {
       }
       if (!res.ok) {
         const errText = await res.text();
-        // thinkingConfig 不支援時，自動移除並重試一次
         if (res.status === 400 && errText.includes('thinkingConfig') && attempt === 0) {
           console.warn('[Gemini] thinkingConfig 不支援，移除後重試');
           delete body.generationConfig.thinkingConfig;
@@ -741,11 +738,11 @@ function buildAiContext(room, ai) {
   }
 
   // ✅ 過濾掉死者的訊息（只保留存活玩家的對話）
-const recent = (room.recentPublicChat || []).filter(m => {
-  const speaker = room.players.find(p => p.name === m.from);
-  return speaker ? speaker.alive : true;   // 找不到就保留（例如系統訊息）
-}).slice(-10);
-const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（目前還沒有人發言）';
+  const recent = (room.recentPublicChat || []).filter(m => {
+    const speaker = room.players.find(p => p.name === m.from);
+    return speaker ? speaker.alive : true;
+  }).slice(-10);
+  const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（目前還沒有人發言）';
 
   const playerList = alive.map(p => {
     let tag = '';
@@ -824,31 +821,29 @@ ${ctx.myHistory || '（還沒發言過）'}
 
 【你的任務】
 
-用繁體中文，寫 15~20 字的完整句子。
+用繁體中文，寫 25~50 字的完整句子。
 像真的坐在同一桌狼人殺現場一樣接話。
 必須是完整句子，不要只寫兩三個字。
-
-你不是獨立發言的旁白，而是要回應前面的人。
 
 ⚠️ 重要規則：
 1. 優先回應【最近對話】最後 1~2 位玩家。
 2. 先理解上一位玩家的核心觀點，再決定你要「同意、反駁、補充或追問」。
-3. 最好直接點名你正在回應的玩家，並提到他剛剛說的內容。
+3. 最好直接點名你正在回應的玩家。
 4. 如果你之前已經懷疑某人，除非出現新的公開資訊，不要突然完全改口。
 5. 如果你改變立場，必須說明改變原因。
-6. 不要把只有你自己知道的夜間資訊，當成所有玩家都知道的公開資訊。
+6. 不要把只有你自己知道的夜間資訊，當成公開資訊。
 7. 不要每次都隨機換一個懷疑對象。
 8. 如果要反駁別人，要針對對方剛剛提出的理由反駁。
 9. 必須提到至少一位玩家名字。
 10. 不要重複自己之前說過的原句。
 11. 必須符合自己的個性。
-12. 直接輸出發言，不要引號、不要條列、不要換行。`
-13. 絕對不要回應或提到已死亡的玩家，他們已經不能發言了。;
+12. 直接輸出發言，不要引號、不要條列、不要換行。
+13. 絕對不要回應或提到已死亡的玩家，他們已經不能發言了。`;
 
   return await askGPT([
     { role: 'system', content: '你是狼人殺玩家，依個性發言，並保持立場一致。用繁體中文。' },
     { role: 'user', content: prompt }
-  ], 600);   // ✅ 從 120 提高到 600
+  ], 600);
 }
 
 // ============================================================
@@ -887,7 +882,7 @@ ${ctx.others.map(p => `- ${p.name}`).join('\n')}
   const text = await askGPT([
     { role: 'system', content: '只回傳 JSON。' },
     { role: 'user', content: prompt }
-  ], 200);   // ✅ 從 60 提高到 200
+  ], 200);
 
   if (!text) return null;
   try {
@@ -1001,8 +996,18 @@ function decideTargetByBelief(room, ai, context) {
     case 'FOLLOW': return randomPick(candidates).id;
     case 'CONTRARIAN': {
       const beliefs = room.aiBeliefs[ai.id] || {};
-      const sorted = candidates.slice().sort((a,b) => (beliefs[a.id]?.wolfProb||0) - (beliefs[b.id]?.wolfProb||0));
-      return sorted[0]?.id || randomPick(candidates).id;
+      // ✅ 先隨機打亂，避免同分時永遠選同一個人（人類）
+      const shuffled = candidates.slice().sort(() => Math.random() - 0.5);
+      shuffled.sort((a, b) =>
+        (beliefs[a.id]?.wolfProb || 0) - (beliefs[b.id]?.wolfProb || 0)
+      );
+      const minProb = beliefs[shuffled[0].id]?.wolfProb || 0;
+      const bottomCandidates = shuffled.filter(c =>
+        (beliefs[c.id]?.wolfProb || 0) <= minProb + 0.01
+      );
+      return bottomCandidates.length
+        ? randomPick(bottomCandidates).id
+        : randomPick(candidates).id;
     }
     case 'RANDOM': return randomPick(candidates).id;
     default: return pickTargetByBelief(room, ai, p => candidates.find(c => c.id === p.id));
@@ -1229,7 +1234,7 @@ function checkWolfUnified(room) {
 }
 
 // ============================================================
-// 🗣 AI 序列化討論
+// 🗣 AI 序列化討論（每天只跑一輪）
 // ============================================================
 async function runAiDiscussion(room) {
   if (room.aiDiscussionRunning) return;
@@ -1238,7 +1243,6 @@ async function runAiDiscussion(room) {
   room.aiDiscussionSpoken = new Set();
 
   try {
-    // 白天開始後先等一下
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     while (room.phase === 'DAY_DISCUSS') {
@@ -1258,7 +1262,6 @@ async function runAiDiscussion(room) {
       await aiSpeak(room, nextAi);
 
       if (room.phase === 'DAY_DISCUSS') {
-        // ✅ 間隔拉長到 4 秒，讓前端有時間顯示
         await new Promise(resolve => setTimeout(resolve, 4000));
       }
     }
@@ -1392,8 +1395,15 @@ function scheduleAiActions(room, phase) {
 
         const aliveCount = room.players.filter(p => p.alive).length;
         if (Object.keys(room.votes).length >= aliveCount) {
-          clearTimeout(room.timer);
-          setTimeout(() => resolveVote(room), 800);
+          if (!room.voteFinalizeScheduled) {
+            room.voteFinalizeScheduled = true;
+            setTimeout(() => {
+              if (room.phase === 'DAY_VOTE') {
+                clearTimeout(room.timer);
+                resolveVote(room);
+              }
+            }, 15000);
+          }
         }
       }, 2000 + idx * 3500);
     });
@@ -1527,10 +1537,10 @@ function setPhase(room, phase) {
     : (PHASE_SECONDS[phase] || 20);
 
   room.endsAt = Date.now() + sec*1000;
- if (phase === 'DAY_VOTE') {
-  room.votes = {};
-  room.voteFinalizeScheduled = false;
-}
+  if (phase === 'DAY_VOTE') {
+    room.votes = {};
+    room.voteFinalizeScheduled = false;
+  }
   if (phase === 'NIGHT_SEER') {
     room.seerVotes = {};
     room.seerResolved = false;
@@ -1620,6 +1630,7 @@ function startGame(room) {
   room.recentPublicChat = [];
   room.speakCount = {};
   room.voteHistory = [];
+  room.voteFinalizeScheduled = false;
   room.aiDiscussionRunning = false;
   room.aiDiscussionSpoken = new Set();
 
@@ -1805,6 +1816,11 @@ function handleLeave(socket) {
   socket.leave(roomId);
   socket.data.roomId = null;
 
+  // ✅ 清掉離線者的投票記錄
+  if (room.votes) delete room.votes[removed.id];
+  if (room.wolfVotes) delete room.wolfVotes[removed.id];
+  if (room.seerVotes) delete room.seerVotes[removed.id];
+
   if (inGame) {
     broadcastPlayers(room);
     if (checkWin(room)) return;
@@ -1847,7 +1863,7 @@ io.on('connection', socket => {
       votes:{}, pendingDeaths:[], doctorTarget:null, sniperTarget:null,
       doctorShotsLeft:0, sniperShotsLeft:0, emptyShotCount:{},
       aiIntel:{}, aiBeliefs:{}, recentPublicChat:[], speakCount:{}, voteHistory:[],
-      timer:null, endsAt:null,
+      timer:null, endsAt:null, voteFinalizeScheduled:false,
       aiDiscussionRunning:false, aiDiscussionSpoken:new Set(),
     };
     room.players.push({
@@ -1958,6 +1974,7 @@ io.on('connection', socket => {
     room.seerChecks = {}; room.seerVotes = {}; room.seerResolved = false; room.pendingDeaths = [];
     room.doctorTarget = null; room.sniperTarget = null; room.emptyShotCount = {};
     room.aiIntel = {}; room.aiBeliefs = {}; room.recentPublicChat = []; room.speakCount = {}; room.voteHistory = [];
+    room.voteFinalizeScheduled = false;
     room.aiDiscussionRunning = false;
     room.aiDiscussionSpoken = new Set();
     room.players.forEach(p => {
@@ -2074,14 +2091,26 @@ io.on('connection', socket => {
     resolveNight(room);
   });
 
+  // ✅ 允許改票、防止一人兩票、防止投自己/死人
   socket.on('day_vote', payload => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.phase !== 'DAY_VOTE') return;
     const me = room.players.find(p => p.id === socket.id);
     if (!me || !me.alive) return;
 
-    // ✅ 移除「已投過就 return」的檢查，允許改票
-    room.votes[me.id] = (payload && payload.targetId) || null;
+    const targetId = (payload && payload.targetId) || null;
+
+    // 不能投自己
+    if (targetId === me.id) return;
+
+    // 不能投死人
+    if (targetId) {
+      const target = room.players.find(p => p.id === targetId && p.alive);
+      if (!target) return;
+    }
+
+    // 一人一票：直接覆蓋
+    room.votes[me.id] = targetId;
 
     io.to(room.roomId).emit('vote_updated', {
       votes: tallyVotes(room),
@@ -2089,7 +2118,6 @@ io.on('connection', socket => {
     });
     broadcastTeammateVotes(room);
 
-    // ✅ 全部投完後，等 15 秒緩衝（可改票），再結算
     const aliveCount = room.players.filter(p => p.alive).length;
     if (Object.keys(room.votes).length >= aliveCount) {
       if (!room.voteFinalizeScheduled) {
@@ -2103,6 +2131,7 @@ io.on('connection', socket => {
       }
     }
   });
+
   socket.on('chat_send', payload => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
@@ -2113,6 +2142,7 @@ io.on('connection', socket => {
     const text = String((payload && payload.text) || '').trim().slice(0, 200);
     if (!text) return;
 
+    // 遺言：只發一次（修正重複）
     if (channel === 'PUBLIC' && !me.alive) {
       if (!me.canSpeakInPublic) {
         io.to(me.id).emit('error_message', { message: '你已經發表過遺言，無法再於公開頻道發言。' });
