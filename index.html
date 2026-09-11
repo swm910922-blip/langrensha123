@@ -104,6 +104,7 @@ input{font-family:inherit}
 .pcard .needlebadge{position:absolute;top:6px;right:6px;background:var(--doctor);color:#082f49;
   border-radius:99px;padding:1px 7px;font-size:10px;font-weight:800;}
 .pcard .matetag{position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font-size:9px;padding:1px 6px;border-radius:99px;font-weight:700;letter-spacing:.5px;white-space:nowrap;}
+.pcard .voters{font-size:9.5px;color:var(--gold);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;letter-spacing:.3px;line-height:1.3;padding:0 2px;}
 .pcard .matetag.seer{background:rgba(34,211,238,.2);color:var(--doctor);border:1px solid rgba(34,211,238,.5)}
 .pcard .matetag.wolf{background:rgba(248,113,113,.2);color:var(--wolf);border:1px solid rgba(248,113,113,.5)}
 .pcard.is-seermate{border-color:rgba(34,211,238,.6)}
@@ -227,8 +228,8 @@ let state = {
   teammateVotes: {},
   seerMates: [],
   wolfMates: [],
+  voteDetail: {},
 };
-
 const app = document.getElementById('app');
 
 function render(){
@@ -491,7 +492,7 @@ function playerCard(p){
   const checkMark = state.phaseData?.checks?.[p.id];
   const emptyCount = state.phaseData?.emptyCounts?.[p.id] || 0;
 
-  // 🔮 警察同夥（加安全檢查）
+  // 🔮 同夥判定
   const seerMatesArr = Array.isArray(state.seerMates) ? state.seerMates : [];
   const wolfMatesArr = Array.isArray(state.wolfMates) ? state.wolfMates : [];
   const isSeerMate = state.myRole === 'SEER' && seerMatesArr.some(m => m.id === p.id);
@@ -500,6 +501,15 @@ function playerCard(p){
   let mateTag = '';
   if (isSeerMate) mateTag = `<span class="matetag seer">🔮 警察夥伴</span>`;
   else if (isWolfMate) mateTag = `<span class="matetag wolf">🐺 同夥</span>`;
+
+  // 🔑 投票明細：誰投給了這個人
+  const detail = state.voteDetail || state.phaseData?.voteDetail || {};
+  const voterNames = Object.keys(detail)
+    .filter(voterId => detail[voterId] === p.id)
+    .map(voterId => nameOf(voterId));
+  const votersHtml = voterNames.length
+    ? `<div class="voters">👤 ${voterNames.join('、')}</div>`
+    : '';
 
   return `
     <div class="pcard ${p.alive?'':'dead'} ${isMe?'me':''} ${isSelectable?'selectable':''} ${isSelected?'selected':''} ${isSeerMate?'is-seermate':''} ${isWolfMate?'is-wolfmate':''}"
@@ -510,6 +520,7 @@ function playerCard(p){
       <div class="avatar">${p.isAI?'🤖':p.name.slice(0,1).toUpperCase()}</div>
       <div class="pname">${p.name}</div>
       <div class="pmeta">${!p.alive ? '已出局' : p.isHost ? '房主' : p.isAI ? '🤖 AI' : ''}</div>
+      ${votersHtml}
       ${mateTag}
     </div>
   `;
@@ -780,6 +791,7 @@ socket.on('phase_changed', payload => {
   state.phase = payload.phase; state.day = payload.day;
   state.endsAt = payload.endsAt; state.phaseData = payload.data || {};
   state.myVote = null; state.selectedTarget = null;
+  if(payload.data?.voteDetail) state.voteDetail = payload.data.voteDetail;
   state.teammateVotes = payload.data?.teammateVotes || {};
 
   if(state.phaseData.shotsLeft !== undefined){
@@ -805,7 +817,11 @@ socket.on('seer_teammate_votes', ({ votes }) => {
   render();
 });
 
-socket.on('vote_updated', ({ votes }) => { state.phaseData.votes = votes; render(); });
+socket.on('vote_updated', ({ votes, voteDetail }) => {
+  state.phaseData.votes = votes;
+  if (voteDetail) state.voteDetail = voteDetail;
+  render();
+});
 
 socket.on('chat_message', msg => {
   const ch = msg.channel || 'PUBLIC';
