@@ -99,27 +99,39 @@ async function detectGroqModel() {
       return null;
     }
     const data = await res.json();
-    const available = (data.data || []).map(m => m.id);
-    console.log(`[Groq] 可用模型: ${available.join(', ')}`);
+    const allModels = (data.data || []).map(m => m.id);
+    console.log(`[Groq] 所有可用模型: ${allModels.join(', ')}`);
 
+    // 🔑 過濾：排除 TTS / Whisper / 語音相關模型
+    const excludeKeywords = ['tts', 'whisper', 'orpheus', 'playai', 'audio', 'speech', 'voice'];
+    const chatModels = allModels.filter(id => {
+      const lower = id.toLowerCase();
+      return !excludeKeywords.some(kw => lower.includes(kw));
+    });
+
+    console.log(`[Groq] 聊天模型: ${chatModels.join(', ')}`);
+
+    // 從候選清單挑
     for (const model of GROQ_MODEL_CANDIDATES) {
-      if (available.includes(model)) {
+      if (chatModels.includes(model)) {
         console.log(`[Groq] ✅ 選用模型: ${model}`);
         return model;
       }
     }
 
-    if (available.length > 0) {
-      console.log(`[Groq] ✅ 選用第一個可用模型: ${available[0]}`);
-      return available[0];
+    // 沒匹配 → 選第一個聊天模型
+    if (chatModels.length > 0) {
+      console.log(`[Groq] ✅ 選用第一個聊天模型: ${chatModels[0]}`);
+      return chatModels[0];
     }
+
+    console.warn('[Groq] ❌ 沒有可用的聊天模型');
     return null;
   } catch (e) {
     console.warn('[Groq] 偵測錯誤', e.message);
     return null;
   }
 }
-
 // ============================================================
 // 🔍 Gemini 模型偵測
 // ============================================================
