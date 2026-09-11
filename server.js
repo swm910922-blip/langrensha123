@@ -39,11 +39,11 @@ const GROQ_MODEL_CANDIDATES = [
 ];
 
 const GEMINI_MODEL_CANDIDATES = [
-  'gemini-flash-latest',           // ✅ 你帳號確認可用
-  'gemini-3.6-flash',              // ✅ 最新穩定版
-  'gemini-3.5-flash',              // ✅ 備用
-  'gemini-3.1-flash-lite',         // ✅ 更省額度
-  'gemini-flash-lite-latest',      // ✅ 最後備用
+  'gemini-3.6-flash',           // ✅ 最新版，通常最空
+  'gemini-3.5-flash',           // ✅ 備用
+  'gemini-3.1-flash-lite',      // ✅ 輕量版，最不容易塞車
+  'gemini-flash-latest',
+  'gemini-flash-lite-latest',
 ];
 let activeGroqModel = null;
 let activeGeminiModel = null;
@@ -296,22 +296,64 @@ async function callGemini(messages, maxTokens) {
     generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 }
   };
   if (systemMsg) body.systemInstruction = { parts: [{ text: systemMsg.content }] };
+
   const url = `https://generativelanguage.googleapis.com/${activeGeminiApiVersion}/models/${activeGeminiModel}:generateContent?key=${GEMINI_API_KEY}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (res.status === 429) { console.warn('[Gemini] 429 → 改用模板'); return null; }
-    if (!res.ok) { console.warn('[Gemini]', res.status); return null; }
-    const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
-  } catch (e) {
+
+  const MAX_RETRY = 3;
+  let lastErr = null;
+
+  for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (res.status === 429) {
+        const retryAfter = parseFloat(res.headers.get('retry-after')) || (2 ** attempt);
+        console.warn(`[Gemini] 429 → 等待 ${retryAfter.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY})`);
+        await new Promise(r => setTimeout(r, retryAfter * 1000));
+        lastErr = 'rate_limit';
+        continue;
+      }
+
+      if (res.status === 503 || res.status === 500 || res.status === 502) {
+        const wait = (2 ** attempt) + Math.random();
+        console.warn(`[Gemini] ${res.status} → 等待 ${wait.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY})`);
+        await new Promise(r => setTimeout(r, wait * 1000));
+        lastErr = `http_${res.status}`;
+        continue;
+      }
+
+      if (!res.ok) {
+        console.warn('[Gemini]', res.status, (await res.text()).slice(0, 150));
+        return null;
+      }
+
+      const data = await res.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+
+    } catch (e) {
+      clearTimeout(timeout);
+      lastErr = e.message;
+      if (attempt < MAX_RETRY - 1) {
+        const wait = (2 ** attempt) + Math.random();
+        console.warn(`[Gemini] 例外 → 等待 ${wait.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY}):`, e.message);
+        await new Promise(r => setTimeout(r, wait * 1000));
+        continue;
+      }
+    }
+  }
+
+  console.warn(`[Gemini] 放棄重試，最後錯誤：${lastErr}`);
+  return null;
+} catch (e) {
     clearTimeout(timeout);
     throw e;
   }
