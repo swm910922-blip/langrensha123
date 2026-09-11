@@ -484,8 +484,18 @@ function playerCard(p){
   const checkMark = state.phaseData?.checks?.[p.id];
   const emptyCount = state.phaseData?.emptyCounts?.[p.id] || 0;
 
+  // 🔮 警察同夥
+  const isSeerMate = state.myRole === 'SEER' && state.seerMates.some(m => m.id === p.id);
+  // 🐺 狼人同伴
+  const isWolfMate = state.myRole === 'WEREWOLF' && state.wolfMates.some(m => m.id === p.id);
+
+
+    let mateTag = '';
+  if (isSeerMate) mateTag = `<span class="matetag seer">🔮 警察夥伴</span>`;
+  else if (isWolfMate) mateTag = `<span class="matetag wolf">🐺 同夥</span>`;
+
   return `
-    <div class="pcard ${p.alive?'':'dead'} ${isMe?'me':''} ${isSelectable?'selectable':''} ${isSelected?'selected':''}"
+    <div class="pcard ${p.alive?'':'dead'} ${isMe?'me':''} ${isSelectable?'selectable':''} ${isSelected?'selected':''} ${isSeerMate?'is-seermate':''} ${isWolfMate?'is-wolfmate':''}"
          data-pid="${p.id}">
       ${voteCount ? `<span class="votebadge">${voteCount}</span>` : ''}
       ${emptyCount ? `<span class="needlebadge">💉${emptyCount}</span>` : ''}
@@ -493,6 +503,7 @@ function playerCard(p){
       <div class="avatar">${p.isAI?'🤖':p.name.slice(0,1).toUpperCase()}</div>
       <div class="pname">${p.name}</div>
       <div class="pmeta">${!p.alive ? '已出局' : p.isHost ? '房主' : p.isAI ? '🤖 AI' : ''}</div>
+      ${mateTag}
     </div>
   `;
 }
@@ -512,11 +523,16 @@ function ActionPanelHTML(){
   }
 
   switch(state.phase){
-    case 'NIGHT_WOLF': {
+        case 'NIGHT_WOLF': {
       if(state.myRole !== 'WEREWOLF') return `<div class="desc">🌙 天黑請閉眼…</div>`;
       const partner = (d.wolfPartners || []).map(p => p.name).join('、');
+      let matesHint = '';
+      if (state.wolfMates.length > 0) {
+        matesHint = `<div class="shoot-info" style="color:var(--wolf)">🐺 你的狼人同伴：${state.wolfMates.map(m=>m.name).join('、')}</div>`;
+      }
       return `
         <div class="title">🐺 狼人行動</div>
+        ${matesHint}
         <div class="desc">同伴：${partner || '（無）'}</div>
         ${teammatePanel}
         <div class="btns">
@@ -525,7 +541,7 @@ function ActionPanelHTML(){
           </button>
         </div>`;
     }
-        case 'NIGHT_SEER': {
+            case 'NIGHT_SEER': {
       if(state.myRole !== 'SEER') return `<div class="desc">🌙 天黑請閉眼…</div>`;
       const checks = d.checks || {};
       const checkedList = Object.entries(checks).map(([id,c]) => `${nameOf(id)}：${c==='WOLF'?'🐺 壞人':'✅ 好人'}`).join('<br/>');
@@ -535,22 +551,28 @@ function ActionPanelHTML(){
       const votedCount = d.seerVotedCount || 0;
       const totalSeers = matesCount + 1;
 
+      // 同夥名單提示
+      let matesHint = '';
+      if (state.seerMates.length > 0) {
+        matesHint = `<div class="shoot-info" style="color:var(--doctor)">🔮 你的警察同夥：${state.seerMates.map(m=>m.name).join('、')}</div>`;
+      }
+
       // 同伴投票面板
       let matePanel = '';
       if (matesCount > 0 && Object.keys(mateVotes).length > 0) {
         const rows = Object.entries(mateVotes)
           .map(([id, v]) => `<div style="display:flex;justify-content:space-between;padding:3px 0"><span>${v.name}</span><span style="color:var(--doctor)">→ ${v.targetName}</span></div>`)
           .join('');
-        matePanel = `<div class="shoot-info">🔮 同伴投票：<br/>${rows}</div>`;
+        matePanel = `<div class="shoot-info">👥 同夥投票：<br/>${rows}</div>`;
       }
 
-      // 已投過票 → 顯示等待狀態
       if (myVote) {
         const mateInfo = matesCount > 0
           ? `<div class="desc">已投票 ${votedCount}/${totalSeers} 位警察</div>`
           : `<div class="desc">已送出查驗，等待結果…</div>`;
         return `
           <div class="title">🔮 警察查驗</div>
+          ${matesHint}
           <div class="desc">✅ 你已投票給 <b style="color:var(--doctor)">${nameOf(myVote)}</b></div>
           ${matePanel}
           ${mateInfo}`;
@@ -558,6 +580,7 @@ function ActionPanelHTML(){
 
       return `
         <div class="title">🔮 警察查驗</div>
+        ${matesHint}
         <div class="desc">${matesCount > 0 ? `點擊玩家頭像投票，所有警察共同決定查驗對象（${totalSeers} 位警察）。` : '點擊玩家頭像查驗陣營。'}</div>
         ${matePanel}
         ${checkedList ? `<div class="desc" style="border-top:1px solid var(--line);padding-top:8px">${checkedList}</div>` : ''}
@@ -625,7 +648,10 @@ function ActionPanelHTML(){
 function nameOf(id){ return state.players.find(p => p.id === id)?.name || '未知'; }
 
 function chatMsgHTML(m){
-  if(m.system) return `<div class="msg system">${m.text}</div>`;
+  if(m.system) {
+    const txt = String(m.text || '').replace(/\n/g, '<br>');
+    return `<div class="msg system">${txt}</div>`;
+  }
   const cls = m.channel === 'WOLF' ? 'wolf' : m.channel === 'DEAD' ? 'dead' : m.channel === 'EVIL' ? 'evil' : '';
   return `<div class="msg ${cls}"><span class="who">${m.from}：</span>${m.text}</div>`;
 }
