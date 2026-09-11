@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v5.0（等級 3：GPT 智慧 AI）
+// 狼人殺後端 v5.1（GPT + 請求排隊）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -18,7 +18,7 @@ const rooms = new Map();
 
 const PHASE_SECONDS = {
   NIGHT_WOLF: 30, NIGHT_SEER: 25, NIGHT_DOCTOR: 20, NIGHT_SNIPER: 20,
-  DAY_ANNOUNCE: 12, DAY_DISCUSS: 60, DAY_VOTE: 30,
+  DAY_ANNOUNCE: 12, DAY_DISCUSS: 90, DAY_VOTE: 45,
 };
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
@@ -28,76 +28,90 @@ const USE_GPT = !!OPENAI_API_KEY;
 console.log(USE_GPT ? '🤖 GPT 模式已啟用' : '📊 貝氏推斷模式（未設定 OPENAI_API_KEY）');
 
 // ============================================================
-// 工具
+// 🚦 請求隊列（每分鐘最多 8 次，避開 RPM 限制）
 // ============================================================
-function genRoomId(len) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let id = '';
-  do { id = ''; for (let i=0;i<len;i++) id += chars[Math.floor(Math.random()*chars.length)]; }
-  while (rooms.has(id));
-  return id;
-}
-function nameOf(room, id) { return room.players.find(x=>x.id===id)?.name || '未知'; }
-function roleName(role) {
-  return { WEREWOLF:'🐺 狼人', SNIPER:'🎯 狙擊手', SEER:'🔮 警察', DOCTOR:'💉 醫生', VILLAGER:'👤 平民' }[role] || role;
-}
-function publicPlayers(room) {
-  return room.players.map(p => ({ id:p.id, name:p.name, alive:p.alive, isHost:p.isHost, isAI:!!p.isAI }));
-}
-function roomPayload(room) { return { roomId:room.roomId, players:publicPlayers(room), phase:room.phase }; }
-function broadcastPlayers(room) { io.to(room.roomId).emit('players_updated', { players: publicPlayers(room) }); }
-function emitRoomState(room) { io.to(room.roomId).emit('room_updated', roomPayload(room)); }
-function tallyVotes(room) { const t={}; Object.values(room.votes).forEach(v => { if(v) t[v]=(t[v]||0)+1; }); return t; }
-function topVoted(tally) { let max=0,top=null; Object.keys(tally).forEach(id => { if(tally[id]>max){max=tally[id];top=id;} }); return top; }
-function systemMsg(room, text) { io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', system:true, text }); }
-function randomPick(arr) { return arr[Math.floor(Math.random()*arr.length)]; }
+const REQUEST_INTERVAL = 8000; // 每 8 秒一次 → 每分鐘 7.5 次
+let lastRequestAt = 0;
+const requestQueue = [];
+let queueRunning = false;
 
-function killPlayer(room, p, cause) {
-  if (!p || !p.alive) return false;
-  p.alive = false;
-  p.deathCause = cause;
-  p.canSpeakInPublic = true;
-  return true;
+async function processQueue() {
+  if (queueRunning) return;
+  queueRunning = true;
+  while (requestQueue.length > 0) {
+    const job = requestQueue.shift();
+    const now = Date.now();
+    const wait = Math.max(0, lastRequestAt + REQUEST_INTERVAL - now);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    lastRequestAt = Date.now();
+    try {
+      const result = await job.fn();
+      job.resolve(result);
+    } catch (e) {
+      job.resolve(null);
+    }
+  }
+  queueRunning = false;
 }
-function announceDeath(room, player, cause) {
-  const causeText = { WOLF:'被狼人殺害', SNIPER:'被狙擊手擊殺', VOTE:'被投票放逐', DOCTOR:'被醫生的空針毒死', DISCONNECT:'離線' }[cause] || '出局';
-  systemMsg(room, `💀 ${player.name} ${causeText}，他的身分是【${roleName(player.role)}】，可以發表一句遺言。`);
-  onPlayerRevealed(room, player);
+
+function enqueue(fn) {
+  return new Promise((resolve) => {
+    requestQueue.push({ fn, resolve });
+    processQueue();
+  });
 }
 
 // ============================================================
-// 🤖 OpenAI 呼叫
+// 🤖 OpenAI 呼叫（含隊列 + 重試）
 // ============================================================
 async function askGPT(messages, maxTokens = 120) {
   if (!USE_GPT) return null;
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        messages,
-        max_tokens: maxTokens,
-        temperature: 0.85,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!res.ok) {
-      console.warn('[GPT]', res.status, (await res.text()).slice(0, 200));
-      return null;
-    }
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content?.trim() || null;
-  } catch (e) {
-    console.warn('[GPT error]', e.message);
-    return null;
-  }
+
+  // 包進隊列，避免打爆 RPM
+  return enqueue(async () => {
+    const tryOnce = async (attempt) => {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        const res = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: OPENAI_MODEL,
+            messages,
+            max_tokens: maxTokens,
+            temperature: 0.85,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        if (res.status === 429) {
+          // 限速 → 等 8 秒重試一次
+          if (attempt < 1) {
+            console.warn('[GPT] 429 限速，等待重試…');
+            await new Promise(r => setTimeout(r, 8000));
+            return tryOnce(attempt + 1);
+          }
+          console.warn('[GPT] 429 放棄');
+          return null;
+        }
+        if (!res.ok) {
+          console.warn('[GPT]', res.status, (await res.text()).slice(0, 150));
+          return null;
+        }
+        const data = await res.json();
+        return data.choices?.[0]?.message?.content?.trim() || null;
+      } catch (e) {
+        console.warn('[GPT error]', e.message);
+        return null;
+      }
+    };
+    return await tryOnce(0);
+  });
 }
 
 // ============================================================
@@ -157,6 +171,44 @@ function pickTargetByBelief(room, ai, filterFn) {
   if (!candidates.length) return null;
   candidates.sort((a, b) => (beliefs[b.id]?.wolfProb || 0) - (beliefs[a.id]?.wolfProb || 0));
   return candidates[0].id;
+}
+
+// ============================================================
+// 工具
+// ============================================================
+function genRoomId(len) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let id = '';
+  do { id = ''; for (let i=0;i<len;i++) id += chars[Math.floor(Math.random()*chars.length)]; }
+  while (rooms.has(id));
+  return id;
+}
+function nameOf(room, id) { return room.players.find(x=>x.id===id)?.name || '未知'; }
+function roleName(role) {
+  return { WEREWOLF:'🐺 狼人', SNIPER:'🎯 狙擊手', SEER:'🔮 警察', DOCTOR:'💉 醫生', VILLAGER:'👤 平民' }[role] || role;
+}
+function publicPlayers(room) {
+  return room.players.map(p => ({ id:p.id, name:p.name, alive:p.alive, isHost:p.isHost, isAI:!!p.isAI }));
+}
+function roomPayload(room) { return { roomId:room.roomId, players:publicPlayers(room), phase:room.phase }; }
+function broadcastPlayers(room) { io.to(room.roomId).emit('players_updated', { players: publicPlayers(room) }); }
+function emitRoomState(room) { io.to(room.roomId).emit('room_updated', roomPayload(room)); }
+function tallyVotes(room) { const t={}; Object.values(room.votes).forEach(v => { if(v) t[v]=(t[v]||0)+1; }); return t; }
+function topVoted(tally) { let max=0,top=null; Object.keys(tally).forEach(id => { if(tally[id]>max){max=tally[id];top=id;} }); return top; }
+function systemMsg(room, text) { io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', system:true, text }); }
+function randomPick(arr) { return arr[Math.floor(Math.random()*arr.length)]; }
+
+function killPlayer(room, p, cause) {
+  if (!p || !p.alive) return false;
+  p.alive = false;
+  p.deathCause = cause;
+  p.canSpeakInPublic = true;
+  return true;
+}
+function announceDeath(room, player, cause) {
+  const causeText = { WOLF:'被狼人殺害', SNIPER:'被狙擊手擊殺', VOTE:'被投票放逐', DOCTOR:'被醫生的空針毒死', DISCONNECT:'離線' }[cause] || '出局';
+  systemMsg(room, `💀 ${player.name} ${causeText}，他的身分是【${roleName(player.role)}】，可以發表一句遺言。`);
+  onPlayerRevealed(room, player);
 }
 
 // ============================================================
@@ -245,7 +297,7 @@ function buildAiContext(room, ai) {
     if (lines.length) checkInfo = `\n【你已知的查驗結果】\n${lines.join('\n')}`;
   }
 
-  const recent = (room.recentPublicChat || []).slice(-15);
+  const recent = (room.recentPublicChat || []).slice(-12);
   const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（目前還沒有人發言）';
 
   const playerList = alive.map(p => {
@@ -291,7 +343,6 @@ ${ctx.chatLog}
 ${ctx.suspLines || '（暫無明顯懷疑對象）'}
 
 請用繁體中文，以一句話（不超過 25 字）發表你的看法。
-可以指控某人、跟隨他人意見、為自己辯護、或提出觀察。
 直接輸出你的發言內容，不要加引號、玩家名字前綴、或任何說明。`;
 
   return await askGPT([
@@ -435,9 +486,6 @@ function decideTargetByBelief(room, ai, context) {
   }
 }
 
-// ============================================================
-// 🗣 AI 發言
-// ============================================================
 async function aiSpeak(room, ai) {
   if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
 
@@ -608,11 +656,12 @@ function scheduleAiActions(room, phase) {
   const ais = room.players.filter(p => p.isAI && p.alive);
 
   if (phase === 'DAY_DISCUSS') {
+    // 🔑 改為：每個 AI 間隔 10 秒，配合 RPM 限制
     ais.forEach((ai, idx) => {
       setTimeout(async () => {
         if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
         await aiSpeak(room, ai);
-      }, 3000 + idx * 4500 + Math.random() * 2000);
+      }, 2000 + idx * 10000);
     });
   }
 
@@ -719,7 +768,7 @@ function scheduleAiActions(room, phase) {
           clearTimeout(room.timer);
           setTimeout(() => resolveVote(room), 800);
         }
-      }, 3000 + idx * 2500 + Math.random() * 2000);
+      }, 2000 + idx * 8000);
     });
   }
 }
