@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v11.5（區分狼人 / 狙擊手）
+// 狼人殺後端 v11.6（警察查驗顯示完整職業）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -438,6 +438,17 @@ function nameOf(room, id) { return room.players.find(x=>x.id===id)?.name || '未
 function roleName(role) {
   return { WEREWOLF:'🐺 狼人', SNIPER:'🎯 狙擊手', SEER:'🔮 警察', DOCTOR:'💉 醫生', VILLAGER:'👤 平民' }[role] || role;
 }
+// ✅ 完整職業標籤
+function roleLabel(role) {
+  if (role === 'WEREWOLF') return '🐺 狼人';
+  if (role === 'SNIPER')   return '🎯 狙擊手';
+  if (role === 'SEER')     return '🔮 警察';
+  if (role === 'DOCTOR')   return '💉 醫生';
+  if (role === 'VILLAGER') return '👤 平民';
+  if (role === 'GOOD')     return '✅ 好人';
+  if (role === 'WOLF')     return '🐺 壞人';
+  return role;
+}
 function publicPlayers(room) {
   return room.players.map(p => ({ id:p.id, name:p.name, alive:p.alive, isHost:p.isHost, isAI:!!p.isAI }));
 }
@@ -530,15 +541,6 @@ function pickTargetByBelief(room, ai, filterFn) {
   const maxProb = beliefs[shuffled[0].id]?.wolfProb || 0;
   const topCandidates = shuffled.filter(c => (beliefs[c.id]?.wolfProb || 0) >= maxProb - 0.01);
   return randomPick(topCandidates).id;
-}
-
-// ✅ 查驗結果代碼 → 中文標籤
-function campLabel(camp) {
-  if (camp === 'WEREWOLF') return '🐺 狼人';
-  if (camp === 'SNIPER')   return '🎯 狙擊手';
-  if (camp === 'GOOD')     return '✅ 好人';
-  if (camp === 'WOLF')     return '🐺 壞人';   // 向後兼容
-  return camp;
 }
 
 // ============================================================
@@ -738,12 +740,12 @@ function buildAiContext(room, ai) {
     campDesc = '你是正義陣營的平民。';
   }
 
-  // ✅ 查驗結果：區分狼人 / 狙擊手 / 好人
+  // ✅ AI 警察看到的查驗結果：完整職業
   let checkInfo = '';
   if (ai.role === 'SEER') {
     const checks = room.seerChecks[ai.id] || {};
-    const lines = Object.entries(checks).map(([id, camp]) =>
-      `  ${nameOf(room, id)} = ${campLabel(camp)}`
+    const lines = Object.entries(checks).map(([id, role]) =>
+      `  ${nameOf(room, id)} = ${roleLabel(role)}`
     );
     if (lines.length) checkInfo = `\n【你已知的查驗結果】\n${lines.join('\n')}`;
   }
@@ -831,7 +833,7 @@ ${ctx.myHistory || '（還沒發言過）'}
 
 【你的任務】
 
-用繁體中文，寫 15~20 字的完整句子。
+用繁體中文，寫 25~50 字的完整句子。
 像真的坐在同一桌狼人殺現場一樣接話。
 必須是完整句子，不要只寫兩三個字。
 
@@ -842,7 +844,7 @@ ${ctx.myHistory || '（還沒發言過）'}
 4. 如果你之前已經懷疑某人，除非出現新的公開資訊，不要突然完全改口。
 5. 如果你改變立場，必須說明改變原因。
 6. 不要把只有你自己知道的夜間資訊，當成公開資訊。
-6-1. 如果你是警察，且已知某人是「狼人」或「狙擊手」，可以明確說出是哪一種。狙擊手和狼人是不同的邪惡角色，狙擊手可能誤殺狼人。
+6-1. 如果你是警察，且已知某人的身分，可以明確說出他的職業（狼人/狙擊手/警察/醫生/平民）。
 7. 不要每次都隨機換一個懷疑對象。
 8. 如果要反駁別人，要針對對方剛剛提出的理由反駁。
 9. 必須提到至少一位玩家名字。
@@ -918,7 +920,6 @@ function processChatForAI(room, speakerId, text) {
       room.aiIntel[ai.id].claimedSeer = speakerId;
     });
   }
-  // ✅ 加入「是狙擊手」
   if (!isNegated && /是狼|是壞人|是邪惡|是狙擊手|他在騙|他在說謊|懷疑/.test(text)) {
     room.players.forEach(target => {
       if (target.id === speakerId) return;
@@ -1176,31 +1177,26 @@ function resolveSeerCheck(room) {
   }
 
   const target = room.players.find(p => p.id === targetId);
-
-  // ✅ 區分狼人 / 狙擊手 / 好人
-  let camp;
-  if (target.role === 'WEREWOLF') camp = 'WEREWOLF';
-  else if (target.role === 'SNIPER') camp = 'SNIPER';
-  else camp = 'GOOD';
-
-  const isEvil = camp !== 'GOOD';
+  // ✅ 完整職業
+  const role = target.role;
+  const isEvil = role === 'WEREWOLF' || role === 'SNIPER';
 
   Object.keys(room.aiBeliefs || {}).forEach(aiId => {
     if (aiId === targetId) return;
-    updateBelief(room, aiId, targetId, isEvil ? +0.7 : -0.4, `查驗結果(${camp})`);
+    updateBelief(room, aiId, targetId, isEvil ? +0.7 : -0.4, `查驗結果(${role})`);
   });
 
   room.players.filter(p => p.role === 'SEER').forEach(seer => {
     if (!room.seerChecks[seer.id]) room.seerChecks[seer.id] = {};
-    room.seerChecks[seer.id][targetId] = camp;
+    room.seerChecks[seer.id][targetId] = role;   // ✅ 存完整職業
   });
 
   room.players.filter(p => p.role === 'SEER' && !p.isAI).forEach(seer => {
     io.to(seer.id).emit('seer_result', {
       targetId,
       targetName: target.name,
-      camp,                 // 'WEREWOLF' / 'SNIPER' / 'GOOD'
-      role: target.role,
+      role: target.role,       // ✅ 完整職業
+      camp: isEvil ? 'WOLF' : 'GOOD',
       shared: true
     });
   });
