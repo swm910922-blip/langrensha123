@@ -85,7 +85,7 @@ input{font-family:inherit}
 .grid-wrap{flex:1;min-width:280px;overflow-y:auto}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:10px}
 .pcard{position:relative;background:var(--panel);border:2px solid var(--line);border-radius:14px;
-  padding:14px 8px;text-align:center;transition:.18s;}
+  padding:14px 8px 24px;text-align:center;transition:.18s;}
 .pcard .avatar{width:46px;height:46px;border-radius:50%;margin:0 auto 8px;
   display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700;
   background:linear-gradient(135deg,#3b4a6b,#2a3345);color:#cfd8e8;}
@@ -103,6 +103,11 @@ input{font-family:inherit}
   border-radius:99px;padding:1px 7px;font-size:11px;font-weight:800;}
 .pcard .needlebadge{position:absolute;top:6px;right:6px;background:var(--doctor);color:#082f49;
   border-radius:99px;padding:1px 7px;font-size:10px;font-weight:800;}
+.pcard .matetag{position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font-size:9px;padding:1px 6px;border-radius:99px;font-weight:700;letter-spacing:.5px;white-space:nowrap;}
+.pcard .matetag.seer{background:rgba(34,211,238,.2);color:var(--doctor);border:1px solid rgba(34,211,238,.5)}
+.pcard .matetag.wolf{background:rgba(248,113,113,.2);color:var(--wolf);border:1px solid rgba(248,113,113,.5)}
+.pcard.is-seermate{border-color:rgba(34,211,238,.6)}
+.pcard.is-wolfmate{border-color:rgba(248,113,113,.6)}
 
 .sidebar{width:290px;display:flex;flex-direction:column;gap:12px;flex-shrink:0}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;display:flex;flex-direction:column}
@@ -123,7 +128,7 @@ input{font-family:inherit}
 .chat-msgs{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;font-size:12.5px;min-height:80px}
 .msg{line-height:1.5;word-break:break-word}
 .msg .who{font-weight:700;margin-right:6px;color:var(--accent)}
-.msg.system{color:var(--muted);font-style:italic;font-size:11.5px}
+.msg.system{color:var(--muted);font-style:italic;font-size:11.5px;white-space:pre-line}
 .chat-input{display:flex;gap:6px;margin-top:10px}
 .chat-input input{flex:1;padding:11px 12px;background:var(--panel-2);border:1px solid var(--line);
   border-radius:9px;color:var(--text);font-size:15px;outline:none;}
@@ -172,7 +177,7 @@ input{font-family:inherit}
   .main{flex-direction:column;gap:10px;min-height:auto}
   .grid-wrap{overflow:visible;min-width:0;width:100%}
   .grid{grid-template-columns:repeat(auto-fill,minmax(88px,1fr));gap:8px}
-  .pcard{padding:10px 5px;border-radius:12px}
+  .pcard{padding:10px 5px 20px;border-radius:12px}
   .pcard .avatar{width:36px;height:36px;font-size:15px;margin-bottom:5px}
   .pcard .pname{font-size:11.5px}
   .pcard .pmeta{font-size:9.5px}
@@ -192,7 +197,7 @@ input{font-family:inherit}
 }
 @media(max-width:400px){
   .grid{grid-template-columns:repeat(auto-fill,minmax(76px,1fr));gap:6px}
-  .pcard{padding:8px 4px}
+  .pcard{padding:8px 4px 18px}
   .pcard .avatar{width:32px;height:32px;font-size:14px}
   .pcard .pname{font-size:11px}
 }
@@ -216,10 +221,12 @@ const ROLE_INFO = {
 let state = {
   screen: 'lobby', roomId: null, myId: null, players: [], isHost: false,
   phase: 'LOBBY', day: 0, myRole: null, phaseData: {}, selectedTarget: null,
-  myVote: null, chats: { PUBLIC: [], WOLF: [], EVIL: [], DEAD: [] },
+  myVote: null, chats: { PUBLIC: [], WOLF: [], EVIL: [], POLICE: [], DEAD: [] },
   chatTab: 'PUBLIC', gameOver: null, endsAt: null,
   doctorShotsLeft: 0, sniperShotsLeft: 0,
   teammateVotes: {},
+  seerMates: [],
+  wolfMates: [],
 };
 
 const app = document.getElementById('app');
@@ -237,8 +244,9 @@ function leaveRoom(){
   state.screen = 'lobby'; state.roomId = null; state.players = [];
   state.isHost = false; state.phase = 'LOBBY'; state.myRole = null;
   state.gameOver = null; state.selectedTarget = null; state.myVote = null;
-  state.phaseData = {}; state.chats = { PUBLIC: [], WOLF: [], EVIL: [], DEAD: [] };
+  state.phaseData = {}; state.chats = { PUBLIC: [], WOLF: [], EVIL: [], POLICE: [], DEAD: [] };
   state.teammateVotes = {};
+  state.seerMates = []; state.wolfMates = [];
   render();
 }
 
@@ -390,7 +398,7 @@ function BoardView(){
           <div class="chat-tabs">
             <button class="chat-tab ${state.chatTab==='PUBLIC'?'active':''}" data-tab="PUBLIC">🌐 公開</button>
             ${state.myRole==='WEREWOLF' ? `<button class="chat-tab wolf ${state.chatTab==='WOLF'?'active':''}" data-tab="WOLF">🐺 狼隊</button>`:''}
-                        ${state.myRole==='SNIPER' ? `<button class="chat-tab evil ${state.chatTab==='EVIL'?'active':''}" data-tab="EVIL">🎯 邪惡</button>`:''}
+            ${state.myRole==='SNIPER' ? `<button class="chat-tab evil ${state.chatTab==='EVIL'?'active':''}" data-tab="EVIL">🎯 邪惡</button>`:''}
             ${state.myRole==='SEER' ? `<button class="chat-tab police ${state.chatTab==='POLICE'?'active':''}" data-tab="POLICE">🔮 警察</button>`:''}
             ${!me?.alive ? `<button class="chat-tab ${state.chatTab==='DEAD'?'active':''}" data-tab="DEAD">💀 亡者</button>`:''}
           </div>
@@ -434,7 +442,6 @@ function BoardView(){
   });
 
   bindActionButtons(el);
-    // 🔑 聊天框自動滾到最新訊息
   setTimeout(() => {
     const box = el.querySelector('.chat-msgs');
     if (box) box.scrollTop = box.scrollHeight;
@@ -484,13 +491,13 @@ function playerCard(p){
   const checkMark = state.phaseData?.checks?.[p.id];
   const emptyCount = state.phaseData?.emptyCounts?.[p.id] || 0;
 
-  // 🔮 警察同夥
-  const isSeerMate = state.myRole === 'SEER' && state.seerMates.some(m => m.id === p.id);
-  // 🐺 狼人同伴
-  const isWolfMate = state.myRole === 'WEREWOLF' && state.wolfMates.some(m => m.id === p.id);
+  // 🔮 警察同夥（加安全檢查）
+  const seerMatesArr = Array.isArray(state.seerMates) ? state.seerMates : [];
+  const wolfMatesArr = Array.isArray(state.wolfMates) ? state.wolfMates : [];
+  const isSeerMate = state.myRole === 'SEER' && seerMatesArr.some(m => m.id === p.id);
+  const isWolfMate = state.myRole === 'WEREWOLF' && wolfMatesArr.some(m => m.id === p.id);
 
-
-    let mateTag = '';
+  let mateTag = '';
   if (isSeerMate) mateTag = `<span class="matetag seer">🔮 警察夥伴</span>`;
   else if (isWolfMate) mateTag = `<span class="matetag wolf">🐺 同夥</span>`;
 
@@ -523,7 +530,7 @@ function ActionPanelHTML(){
   }
 
   switch(state.phase){
-        case 'NIGHT_WOLF': {
+    case 'NIGHT_WOLF': {
       if(state.myRole !== 'WEREWOLF') return `<div class="desc">🌙 天黑請閉眼…</div>`;
       const partner = (d.wolfPartners || []).map(p => p.name).join('、');
       let matesHint = '';
@@ -541,7 +548,7 @@ function ActionPanelHTML(){
           </button>
         </div>`;
     }
-            case 'NIGHT_SEER': {
+    case 'NIGHT_SEER': {
       if(state.myRole !== 'SEER') return `<div class="desc">🌙 天黑請閉眼…</div>`;
       const checks = d.checks || {};
       const checkedList = Object.entries(checks).map(([id,c]) => `${nameOf(id)}：${c==='WOLF'?'🐺 壞人':'✅ 好人'}`).join('<br/>');
@@ -551,13 +558,11 @@ function ActionPanelHTML(){
       const votedCount = d.seerVotedCount || 0;
       const totalSeers = matesCount + 1;
 
-      // 同夥名單提示
       let matesHint = '';
       if (state.seerMates.length > 0) {
         matesHint = `<div class="shoot-info" style="color:var(--doctor)">🔮 你的警察同夥：${state.seerMates.map(m=>m.name).join('、')}</div>`;
       }
 
-      // 同伴投票面板
       let matePanel = '';
       if (matesCount > 0 && Object.keys(mateVotes).length > 0) {
         const rows = Object.entries(mateVotes)
@@ -748,17 +753,27 @@ socket.on('room_updated', payload => {
 
 socket.on('players_updated', ({ players }) => { state.players = players; render(); });
 
-socket.on('game_started', ({ myRole, players, doctorShots, sniperShots }) => {
+socket.on('game_started', ({ myRole, players, doctorShots, sniperShots, seerMates, wolfMates }) => {
   state.myRole = myRole; state.players = players;
   state.doctorShotsLeft = doctorShots || 0;
   state.sniperShotsLeft = sniperShots || 0;
+  state.seerMates = seerMates || [];
+  state.wolfMates = wolfMates || [];
   state.screen = 'board';
-  state.chats = { PUBLIC: [], WOLF: [], EVIL: [], DEAD: [] };
-   state.chatTab = myRole === 'WEREWOLF' ? 'WOLF' : myRole === 'SNIPER' ? 'EVIL' : myRole === 'SEER' ? 'POLICE' : 'PUBLIC';
+  state.chats = { PUBLIC: [], WOLF: [], EVIL: [], POLICE: [], DEAD: [] };
+  state.chatTab = myRole === 'WEREWOLF' ? 'WOLF' : myRole === 'SNIPER' ? 'EVIL' : myRole === 'SEER' ? 'POLICE' : 'PUBLIC';
   state.teammateVotes = {};
   render();
+
   const info = ROLE_INFO[myRole];
-  alert('你的身分是：' + info.icon + ' ' + info.name + '\n\n' + info.desc);
+  let extra = '';
+  if (myRole === 'SEER' && seerMates && seerMates.length > 0) {
+    extra = '\n\n🔮 你的警察同夥：' + seerMates.map(m => m.name).join('、');
+  }
+  if (myRole === 'WEREWOLF' && wolfMates && wolfMates.length > 0) {
+    extra = '\n\n🐺 你的狼人同伴：' + wolfMates.map(m => m.name).join('、');
+  }
+  alert('你的身分是：' + info.icon + ' ' + info.name + '\n\n' + info.desc + extra);
 });
 
 socket.on('phase_changed', payload => {
@@ -772,7 +787,7 @@ socket.on('phase_changed', payload => {
     if(state.myRole === 'SNIPER') state.sniperShotsLeft = state.phaseData.shotsLeft;
   }
 
-   if(payload.phase.startsWith('DAY') && (state.chatTab === 'WOLF' || state.chatTab === 'EVIL')) {
+  if(payload.phase.startsWith('DAY') && (state.chatTab === 'WOLF' || state.chatTab === 'EVIL')) {
     state.chatTab = 'PUBLIC';
   }
   if(state.screen !== 'board') state.screen = 'board';
@@ -781,11 +796,12 @@ socket.on('phase_changed', payload => {
 });
 
 socket.on('teammate_votes', ({ votes }) => {
-  socket.on('seer_teammate_votes', ({ votes }) => {
-  if(state.phaseData) state.phaseData.seerTeammateVotes = votes || {};
+  state.teammateVotes = votes || {};
   render();
 });
-  state.teammateVotes = votes || {};
+
+socket.on('seer_teammate_votes', ({ votes }) => {
+  if(state.phaseData) state.phaseData.seerTeammateVotes = votes || {};
   render();
 });
 
