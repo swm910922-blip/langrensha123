@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v8.0（上下文模板 + 智慧限速 + 修復 FOLLOW）
+// 狼人殺後端 v9.0（雙 AI 支援：Gemini + OpenAI）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -21,22 +21,40 @@ const PHASE_SECONDS = {
   DAY_ANNOUNCE: 12, DAY_DISCUSS: 120, DAY_VOTE: 60,
 };
 
+// ============================================================
+// 🤖 AI Provider 設定（自動偵測）
+// ============================================================
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
-const OPENAI_MODEL = 'gpt-4o-mini';
-const USE_GPT = !!OPENAI_API_KEY;
 
-// 🔑 每分鐘最多請求次數
-const OPENAI_RPM = 3;
+let PROVIDER = 'NONE';
+let MODEL_NAME = '';
+let RPM_LIMIT = 3;
 
-// 🔑 GPT 使用機率（避免爆 429）
-const GPT_SPEAK_PROB = 0.3;   // 白天發言 30% 用 GPT
-const GPT_VOTE_PROB = 0.4;    // 投票 40% 用 GPT
-
-if (USE_GPT) {
-  console.log(`🤖 GPT 模式已啟用，使用模型：${OPENAI_MODEL}，限制 ${OPENAI_RPM} RPM`);
-} else {
-  console.log('📊 貝氏推斷模式（未設定 OPENAI_API_KEY）');
+if (GEMINI_API_KEY) {
+  PROVIDER = 'GEMINI';
+  MODEL_NAME = 'gemini-1.5-flash';
+  RPM_LIMIT = 12;  // Gemini 免費層 15 RPM，保守用 12
+} else if (OPENAI_API_KEY) {
+  PROVIDER = 'OPENAI';
+  MODEL_NAME = 'gpt-4o-mini';
+  RPM_LIMIT = 3;   // Tier 0 只有 3 RPM
 }
+
+const USE_GPT = PROVIDER !== 'NONE';
+
+// 🔑 GPT 使用機率
+const GPT_SPEAK_PROB = PROVIDER === 'GEMINI' ? 0.8 : 0.3;  // Gemini 用 80%
+const GPT_VOTE_PROB = PROVIDER === 'GEMINI' ? 0.8 : 0.4;
+
+console.log(`========================================`);
+console.log(`🐺 狼人殺伺服器啟動`);
+console.log(`🤖 AI Provider: ${PROVIDER}`);
+if (USE_GPT) {
+  console.log(`📦 使用模型: ${MODEL_NAME}`);
+  console.log(`⚡ 限速: ${RPM_LIMIT} RPM`);
+}
+console.log(`========================================`);
 
 // ============================================================
 // 🚦 智慧限速
@@ -48,7 +66,7 @@ function getWaitTime() {
   while (requestTimestamps.length > 0 && now - requestTimestamps[0] > 60000) {
     requestTimestamps.shift();
   }
-  if (requestTimestamps.length < OPENAI_RPM) return 0;
+  if (requestTimestamps.length < RPM_LIMIT) return 0;
   return 60000 - (now - requestTimestamps[0]) + 200;
 }
 
@@ -83,42 +101,105 @@ function enqueue(fn) {
 }
 
 // ============================================================
-// 🤖 OpenAI 呼叫（放棄重試，直接退回模板）
+// 🤖 Gemini API 呼叫
+// ============================================================
+async function callGemini(messages, maxTokens) {
+  const systemMsg = messages.find(m => m.role === 'system');
+  const userMsgs = messages.filter(m => m.role !== 'system');
+
+  const body = {
+    contents: userMsgs.map(m => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }]
+    })),
+    generationConfig: {
+      maxOutputTokens: maxTokens,
+      temperature: 0.9,
+    }
+  };
+
+  if (systemMsg) {
+    body.systemInstruction = {
+      parts: [{ text: systemMsg.content }]
+    };
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: controller.signal,
+  });
+  clearTimeout(timeout);
+
+  if (res.status === 429) {
+    console.warn('[Gemini] 429 → 改用模板');
+    return null;
+  }
+  if (!res.ok) {
+    const errText = await res.text();
+    console.warn('[Gemini]', res.status, errText.slice(0, 200));
+    return null;
+  }
+
+  const data = await res.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+}
+
+// ============================================================
+// 🤖 OpenAI API 呼叫
+// ============================================================
+async function callOpenAI(messages, maxTokens) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: MODEL_NAME,
+      messages,
+      max_tokens: maxTokens,
+      temperature: 0.9,
+    }),
+    signal: controller.signal,
+  });
+  clearTimeout(timeout);
+
+  if (res.status === 429) {
+    console.warn('[OpenAI] 429 → 改用模板');
+    return null;
+  }
+  if (!res.ok) {
+    const errText = await res.text();
+    console.warn('[OpenAI]', res.status, errText.slice(0, 200));
+    return null;
+  }
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content?.trim() || null;
+}
+
+// ============================================================
+// 🎯 統一介面
 // ============================================================
 async function askGPT(messages, maxTokens = 120) {
   if (!USE_GPT) return null;
   return enqueue(async () => {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12000);
-      const res = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${OPENAI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: OPENAI_MODEL,
-          messages,
-          max_tokens: maxTokens,
-          temperature: 0.9,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-
-      if (res.status === 429) {
-        console.warn('[GPT] 429 → 改用模板');
-        return null;
-      }
-      if (!res.ok) {
-        console.warn('[GPT]', res.status);
-        return null;
-      }
-      const data = await res.json();
-      return data.choices?.[0]?.message?.content?.trim() || null;
+      if (PROVIDER === 'GEMINI') return await callGemini(messages, maxTokens);
+      if (PROVIDER === 'OPENAI') return await callOpenAI(messages, maxTokens);
+      return null;
     } catch (e) {
-      console.warn('[GPT error]', e.message);
+      console.warn(`[${PROVIDER} error]`, e.message);
       return null;
     }
   });
@@ -278,7 +359,7 @@ const PERSONALITY_WEIGHTS = {
 };
 
 // ============================================================
-// 🗣 上下文感知模板（核心改進）
+// 🗣 上下文感知模板
 // ============================================================
 function getLastSpeaker(room, ai) {
   const recent = room.recentPublicChat || [];
@@ -299,21 +380,17 @@ function contextualSpeech(room, ai, category, targetName) {
   const topVoted = getTopVotedName(room);
 
   const templates = {
-    // 指控 + 引用他人
     ACCUSE_REF: [
       `我同意 ${lastSpeaker} 的看法，${targetName} 確實有問題。`,
       `${lastSpeaker} 剛剛說得對，我也覺得 ${targetName} 怪怪的。`,
       `我跟 ${lastSpeaker} 一樣懷疑 ${targetName}。`,
       `聽完 ${lastSpeaker} 的推理，我更懷疑 ${targetName} 了。`,
-      `${lastSpeaker} 你覺得 ${targetName} 怎樣？我也在懷疑他。`,
     ],
-    // 指控 + 引用票數
     ACCUSE_VOTE: [
       `現在 ${topVoted} 票最多，但我覺得 ${targetName} 更可疑。`,
       `${topVoted} 被這麼多人投，我要不要跟？不過我更懷疑 ${targetName}。`,
       `先別急著投 ${topVoted}，${targetName} 的問題更大。`,
     ],
-    // 純指控
     ACCUSE: [
       `我覺得 ${targetName} 很怪，大家注意一下。`,
       `${targetName} 的發言有點刻意，我懷疑他。`,
@@ -323,7 +400,6 @@ function contextualSpeech(room, ai, category, targetName) {
       `我認為 ${targetName} 應該被放逐。`,
       `${targetName} 邏輯不通，一定是壞人。`,
     ],
-    // 跟風
     FOLLOW: [
       `我同意 ${lastSpeaker}，${targetName} 確實可疑。`,
       `既然 ${lastSpeaker} 都這麼說，那我也投 ${targetName}。`,
@@ -332,7 +408,6 @@ function contextualSpeech(room, ai, category, targetName) {
       `我跟 ${lastSpeaker} 的票，投 ${targetName}。`,
       `既然大家都說 ${targetName}，那就 ${targetName} 吧。`,
     ],
-    // 自保
     DEFEND: [
       `我是好人，不要投我！`,
       `我真的是平民，相信我。`,
@@ -341,7 +416,6 @@ function contextualSpeech(room, ai, category, targetName) {
       `${lastSpeaker} 你為什麼懷疑我？我是好人。`,
       `我不知道為什麼你們懷疑我，我是好人。`,
     ],
-    // 混亂
     CHAOS: [
       `我什麼都不知道，我只是個平民。`,
       `我覺得我們應該全部投自己。`,
@@ -350,14 +424,12 @@ function contextualSpeech(room, ai, category, targetName) {
       `反正都要死，不如拉一個墊背的。`,
       `誰投我我就投誰，大家一起死。`,
     ],
-    // 直覺
     INTUITION: [
       `我昨晚夢到 ${targetName} 身上有狼味。`,
       `相信我，${targetName} 眼神很虛。`,
       `我的第六感告訴我，${targetName} 有問題。`,
       `直覺告訴我 ${targetName} 是狼。`,
     ],
-    // 佛系
     LAZY: [
       `我覺得都行。`,
       `先觀望。`,
@@ -367,7 +439,6 @@ function contextualSpeech(room, ai, category, targetName) {
     ],
   };
 
-  // 根據個性選擇分類
   let chosenCategory = category;
   if (ai.personality === 'LAZY') chosenCategory = 'LAZY';
   else if (ai.personality === 'INTUITIVE') chosenCategory = 'INTUITION';
@@ -377,12 +448,11 @@ function contextualSpeech(room, ai, category, targetName) {
   else if (ai.personality === 'IMPULSIVE' || ai.personality === 'LOYAL') chosenCategory = 'FOLLOW';
   else if (ai.personality === 'HONEST') chosenCategory = 'ACCUSE';
 
-  // 有票數就引用票數
   if (topVoted && Math.random() < 0.3) chosenCategory = 'ACCUSE_VOTE';
 
   const pool = templates[chosenCategory] || templates.ACCUSE;
   let text = randomPick(pool);
-  text = text.replace(/\{name\}/g, targetName || '').replace(/\$\{targetName\}/g, targetName || '');
+  text = text.replace(/\$\{targetName\}/g, targetName || '某人');
   text = text.replace(/\$\{lastSpeaker\}/g, lastSpeaker || '某人');
   text = text.replace(/\$\{topVoted\}/g, topVoted || '某人');
   return text;
@@ -445,7 +515,7 @@ function buildAiContext(room, ai) {
 }
 
 // ============================================================
-// 🗣 GPT 發言（只在 30% 機率用）
+// 🗣 GPT 發言
 // ============================================================
 async function aiSpeakWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
@@ -480,7 +550,7 @@ ${ctx.suspLines || '（暫無明顯懷疑）'}
 }
 
 // ============================================================
-// 🗳 GPT 投票（40% 機率用）
+// 🗳 GPT 投票
 // ============================================================
 async function aiVoteWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
@@ -625,7 +695,7 @@ function decideTargetByBelief(room, ai, context) {
 
   switch (strategy) {
     case 'FOLLOW': {
-      // ✅ 修復：改成從所有存活玩家中挑（不是只挑真人）
+      // ✅ 從所有存活玩家中挑
       const allAlive = room.players.filter(p => p.alive);
       if (!allAlive.length) return pickTargetByBelief(room, ai, p => candidates.find(c => c.id === p.id));
       const t = randomPick(allAlive);
@@ -644,13 +714,13 @@ function decideTargetByBelief(room, ai, context) {
 }
 
 // ============================================================
-// 🗣 AI 發言（GPT 30% + 上下文模板 70%）
+// 🗣 AI 發言
 // ============================================================
 async function aiSpeak(room, ai) {
   if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
   if (room.phase === 'GAME_OVER') return;
 
-  // 警察跳警（優先）
+  // 警察跳警
   if (ai.role === 'SEER' && !ai.hasClaimedSeer) {
     const humanSeers = room.players.filter(p => p.role === 'SEER' && p.alive && !p.isAI);
     if (humanSeers.length === 0) {
@@ -679,7 +749,7 @@ async function aiSpeak(room, ai) {
     }
   }
 
-  // GPT 發言（30% 機率）
+  // GPT 發言
   if (USE_GPT && Math.random() < GPT_SPEAK_PROB) {
     const text = await aiSpeakWithGPT(room, ai);
     if (text && room.phase === 'DAY_DISCUSS' && ai.alive) {
@@ -688,7 +758,7 @@ async function aiSpeak(room, ai) {
     }
   }
 
-  // 上下文模板發言（70% 機率）
+  // 上下文模板發言
   const alive = room.players.filter(p => p.alive && p.id !== ai.id);
   if (!alive.length) return;
 
@@ -1658,4 +1728,4 @@ io.on('connection', socket => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('🐺 狼人殺伺服器已啟動，port = ' + PORT));
+server.listen(PORT, () => console.log(`🐺 狼人殺伺服器已啟動，port = ${PORT}`));
