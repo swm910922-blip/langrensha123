@@ -722,6 +722,7 @@ function phasePayload(room, player, speechText) {
 
   if (room.phase === 'DAY_VOTE' && player.alive) {
     data.selectableIds = aliveOthers;
+    data.voteDetail = { ...room.votes };
     const mates = room.players.filter(m => m.id !== player.id && m.alive && m.role === player.role);
     if (mates.length) {
       const mateVotes = {};
@@ -1234,15 +1235,21 @@ io.on('connection', socket => {
     resolveNight(room);
   });
 
-  socket.on('day_vote', payload => {
+   socket.on('day_vote', payload => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.phase !== 'DAY_VOTE') return;
     const me = room.players.find(p => p.id === socket.id);
     if (!me || !me.alive) return;
     if (room.votes[me.id] !== undefined) return;
     room.votes[me.id] = (payload && payload.targetId) || null;
-    io.to(room.roomId).emit('vote_updated', { votes: tallyVotes(room) });
+
+    // 🔑 即時廣播票數 + 投票明細
+    io.to(room.roomId).emit('vote_updated', {
+      votes: tallyVotes(room),
+      voteDetail: { ...room.votes }
+    });
     broadcastTeammateVotes(room);
+
     const aliveCount = room.players.filter(p => p.alive).length;
     if (Object.keys(room.votes).length >= aliveCount) {
       clearTimeout(room.timer);
