@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v5.3（GPT + 警察跳警優化 + 請求排隊）
+// 狼人殺後端 v6.0（GPT + 聰明推理 + 警察跳警優化）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -269,7 +269,7 @@ function pickSpeech(category, name) {
 }
 
 // ============================================================
-// 🧠 AI 上下文組裝
+// 🧠 AI 上下文組裝（強化版）
 // ============================================================
 function buildAiContext(room, ai) {
   const alive = room.players.filter(p => p.alive);
@@ -297,9 +297,11 @@ function buildAiContext(room, ai) {
     if (lines.length) checkInfo = `\n【你已知的查驗結果】\n${lines.join('\n')}`;
   }
 
-  const recent = (room.recentPublicChat || []).slice(-12);
+  // 完整對話紀錄（最近 20 則）
+  const recent = (room.recentPublicChat || []).slice(-20);
   const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（目前還沒有人發言）';
 
+  // 玩家清單
   const playerList = alive.map(p => {
     let tag = '';
     if (p.id === ai.id) tag = '（你）';
@@ -308,24 +310,63 @@ function buildAiContext(room, ai) {
     return `  ${p.name}${tag}`;
   }).join('\n');
 
+  // 死亡紀錄
+  const deaths = room.players.filter(p => !p.alive && p.role)
+    .map(p => `  ${p.name}（${roleName(p.role)}）`);
+  const deathLog = deaths.length ? deaths.join('\n') : '（還沒有人死亡）';
+
+  // 歷史投票紀錄
+  let voteHistory = '';
+  if (room.voteHistory && room.voteHistory.length) {
+    voteHistory = room.voteHistory.slice(-3).map(h =>
+      `第 ${h.day} 天投票：${Object.entries(h.votes).map(([voterId, targetId]) =>
+        `${nameOf(room, voterId)}→${targetId ? nameOf(room, targetId) : '棄票'}`
+      ).join('、')}`
+    ).join('\n');
+  } else {
+    voteHistory = '（還沒有投票紀錄）';
+  }
+
+  // 貝氏推斷摘要
   const beliefs = room.aiBeliefs[ai.id] || {};
   const suspLines = others
     .map(p => ({ name: p.name, prob: beliefs[p.id]?.wolfProb || 0 }))
-    .filter(x => x.prob > 0.3)
+    .filter(x => x.prob > 0.25)
     .sort((a, b) => b.prob - a.prob)
-    .slice(0, 3)
+    .slice(0, 4)
     .map(x => `  ${x.name}：${Math.round(x.prob * 100)}% 是狼`)
     .join('\n');
 
-  return { campDesc, checkInfo, chatLog, playerList, suspLines, alive, others };
+  // 誰曾指控/支持過你
+  const accusers = [];
+  const supporters = [];
+  (room.recentPublicChat || []).forEach(m => {
+    if (m.from === ai.name) return;
+    if (m.text.includes(ai.name)) {
+      if (/是狼|是壞人|懷疑|投他|投她/.test(m.text)) accusers.push(m.from);
+      else if (/是好人|相信|支持/.test(m.text)) supporters.push(m.from);
+    }
+  });
+
+  return {
+    campDesc, checkInfo, chatLog, playerList, suspLines, alive, others,
+    deathLog, voteHistory,
+    accusers: [...new Set(accusers)],
+    supporters: [...new Set(supporters)],
+  };
 }
 
 // ============================================================
-// 🗣 GPT 發言
+// 🗣 GPT 發言（強化推理）
 // ============================================================
 async function aiSpeakWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
   const tone = PERSONALITY_TONE[ai.personality] || '';
+
+  let defendHint = '';
+  if (ctx.accusers.length > 0) {
+    defendHint = `\n⚠️ 注意：${ctx.accusers.join('、')} 曾經懷疑過你。你可以選擇反駁他們、為自己辯護，或繼續正常發言。`;
+  }
 
   const prompt = `你正在玩一場狼人殺遊戲，扮演一位玩家。
 
@@ -333,55 +374,86 @@ async function aiSpeakWithGPT(room, ai) {
 ${ctx.campDesc}
 【你的性格】${tone}
 【當前階段】第 ${room.day} 天 · 白天討論
+
 【存活玩家】
 ${ctx.playerList}${ctx.checkInfo}
 
+【已死亡的玩家】
+${ctx.deathLog}
+
+【前幾輪的投票紀錄】
+${ctx.voteHistory}
+
 【最近對話紀錄】
 ${ctx.chatLog}
+${defendHint}
 
-【你的推理（參考）】
+【你的推理參考】
 ${ctx.suspLines || '（暫無明顯懷疑對象）'}
 
-請用繁體中文，以一句話（不超過 25 字）發表你的看法。
-直接輸出你的發言內容，不要加引號、玩家名字前綴、或任何說明。`;
+【你的任務】
+用一句話（25~40 字）發表你的看法。請根據具體證據推理，例如：
+- 引用某人的發言：「小明昨天說他是預言家，但今天沒報查驗」
+- 分析投票行為：「阿華昨天投給已知的狼，很可疑」
+- 反駁指控你的人：「你說我是狼？你昨天才投給好人」
+- 為自己辯護：「我是清白的，我的投票紀錄都是投狼」
+
+⚠️ 避免空泛的話（「我覺得XX很怪」），要具體引用對話或投票。
+⚠️ 用繁體中文。直接輸出你的發言，不要加引號或前綴。`;
 
   return await askGPT([
-    { role: 'system', content: '你是狼人殺遊戲的玩家，用繁體中文簡短發言，語氣自然。' },
+    {
+      role: 'system',
+      content: '你是狼人殺遊戲的高手玩家，擅長邏輯推理和話術。用繁體中文簡短發言（25~40字），語氣自然但有說服力。'
+    },
     { role: 'user', content: prompt }
-  ], 80);
+  ], 100);
 }
 
 // ============================================================
-// 🗳 GPT 投票
+// 🗳 GPT 投票（要求理由）
 // ============================================================
 async function aiVoteWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
 
-  const prompt = `你正在玩狼人殺遊戲。
+  const prompt = `你正在玩狼人殺遊戲，現在要投票放逐一位玩家。
 
 【你的角色】${ai.name}
 ${ctx.campDesc}
 【你的性格】${PERSONALITY_TONE[ai.personality] || ''}
 【當前階段】第 ${room.day} 天 · 投票放逐
+
 【存活的玩家】
 ${ctx.playerList}${ctx.checkInfo}
+
+【已死亡的玩家】
+${ctx.deathLog}
+
+【前幾輪的投票紀錄】
+${ctx.voteHistory}
 
 【最近對話紀錄】
 ${ctx.chatLog}
 
-【你的推理（參考）】
+【你的推理參考】
 ${ctx.suspLines || '（暫無明顯懷疑對象）'}
+
+【投票原則】
+1. 如果你是好人陣營：優先投你確定是狼的人，其次投「可疑度最高」的人
+2. 如果你是狼人：投好人，但要避免投到隊友
+3. 如果你是警察且查到狼：優先投那個狼
+4. 請分析每個玩家的行為（發言、投票）再做決定
 
 請從以下玩家中選擇你要投票放逐的對象：
 ${ctx.others.map(p => `- ${p.name}`).join('\n')}
 
-用 JSON 格式回傳：{"target": "玩家名字"}
+用 JSON 格式回傳：{"target": "玩家名字", "reason": "簡短理由（10字內）"}
 只回傳 JSON，不要有其他文字。`;
 
   const text = await askGPT([
-    { role: 'system', content: '你是狼人殺遊戲玩家，用 JSON 回傳你的投票。' },
+    { role: 'system', content: '你是狼人殺遊戲高手，用 JSON 回傳投票決定。' },
     { role: 'user', content: prompt }
-  ], 60);
+  ], 80);
 
   if (!text) return null;
   try {
@@ -492,9 +564,8 @@ function decideTargetByBelief(room, ai, context) {
 async function aiSpeak(room, ai) {
   if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
 
-  // 🔮 警察跳警邏輯（優化版）
+  // 🔮 警察跳警邏輯
   if (ai.role === 'SEER' && !ai.hasClaimedSeer) {
-    // 檢查隊裡有沒有真人警察
     const humanSeers = room.players.filter(p => p.role === 'SEER' && p.alive && !p.isAI);
 
     // ✅ 有真人隊友 → AI 全部不跳
@@ -504,7 +575,6 @@ async function aiSpeak(room, ai) {
         p.role === 'SEER' && p.isAI && p.id !== ai.id && p.hasClaimedSeer
       );
 
-      // ✅ 沒有其他 AI 跳過 → 這個 AI 可以跳
       if (!otherAiClaimed) {
         const checks = room.seerChecks[ai.id] || {};
         const knownWolfId = Object.keys(checks).find(id => {
@@ -519,7 +589,6 @@ async function aiSpeak(room, ai) {
           io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: speech });
           ai.hasClaimedSeer = true;
 
-          // 讓所有 AI 大幅提升對該目標的懷疑度
           Object.keys(room.aiBeliefs || {}).forEach(otherAiId => {
             if (otherAiId === ai.id) return;
             updateBelief(room, otherAiId, knownWolfId, +0.55, `${ai.name} 跳警指認`);
@@ -1006,6 +1075,7 @@ function startGame(room) {
   room.emptyShotCount = {};
   room.recentPublicChat = [];
   room.speakCount = {};
+  room.voteHistory = [];
 
   initBeliefs(room);
 
@@ -1069,6 +1139,13 @@ function resolveNight(room) {
         if (killPlayer(room, p, 'DOCTOR')) deaths.push({ id:p.id, name:p.name });
       }
     }
+  }
+
+  // 記錄本輪投票歷史（供 AI 參考）
+  if (!room.voteHistory) room.voteHistory = [];
+  if (Object.keys(room.votes).length > 0) {
+    room.voteHistory.push({ day: room.day, votes: { ...room.votes } });
+    if (room.voteHistory.length > 5) room.voteHistory.shift();
   }
 
   room.pendingDeaths = deaths;
@@ -1188,7 +1265,7 @@ io.on('connection', socket => {
       wolfVotes:{}, wolfTarget:null, seerChecks:{}, seerVotes:{}, seerResolved:false,
       votes:{}, pendingDeaths:[], doctorTarget:null, sniperTarget:null,
       doctorShotsLeft:0, sniperShotsLeft:0, emptyShotCount:{},
-      aiIntel:{}, aiBeliefs:{}, recentPublicChat:[], speakCount:{}, timer:null, endsAt:null,
+      aiIntel:{}, aiBeliefs:{}, recentPublicChat:[], speakCount:{}, voteHistory:[], timer:null, endsAt:null,
     };
     room.players.push({ id:socket.id, name:nickname, alive:true, isHost:true, role:null, isAI:false, canSpeakInPublic:false, hasClaimedSeer:false });
     rooms.set(roomId, room);
@@ -1278,7 +1355,7 @@ io.on('connection', socket => {
     room.votes = {}; room.wolfVotes = {}; room.wolfTarget = null;
     room.seerChecks = {}; room.seerVotes = {}; room.seerResolved = false; room.pendingDeaths = [];
     room.doctorTarget = null; room.sniperTarget = null; room.emptyShotCount = {};
-    room.aiIntel = {}; room.aiBeliefs = {}; room.recentPublicChat = []; room.speakCount = {};
+    room.aiIntel = {}; room.aiBeliefs = {}; room.recentPublicChat = []; room.speakCount = {}; room.voteHistory = [];
     room.players.forEach(p => { p.alive = true; p.role = null; p.deathCause = null; p.canSpeakInPublic = false; p.hasClaimedSeer = false; });
     emitRoomState(room);
     broadcastPlayers(room);
