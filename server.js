@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v10.0（Groq + Gemini + OpenAI 三家自動偵測）
+// 狼人殺後端 v10.1（Groq 自動偵測 + Gemini + OpenAI）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -22,12 +22,25 @@ const PHASE_SECONDS = {
 };
 
 // ============================================================
-// 🤖 AI Provider 設定（自動偵測優先順序）
+// 🤖 AI Provider 設定
 // ============================================================
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
+// Groq 候選模型
+const GROQ_MODEL_CANDIDATES = [
+  'llama-3.3-70b-versatile',
+  'llama-3.3-70b-specdec',
+  'llama-3.1-70b-versatile',
+  'llama-3.1-8b-instant',
+  'llama3-70b-8192',
+  'llama3-8b-8192',
+  'mixtral-8x7b-32768',
+  'gemma2-9b-it',
+];
+
+// Gemini 候選模型
 const GEMINI_MODEL_CANDIDATES = [
   'gemini-2.5-flash',
   'gemini-2.5-pro',
@@ -35,6 +48,7 @@ const GEMINI_MODEL_CANDIDATES = [
   'gemini-flash-latest',
 ];
 
+let activeGroqModel = null;
 let activeGeminiModel = null;
 let activeGeminiApiVersion = 'v1beta';
 let PROVIDER = 'NONE';
@@ -44,8 +58,8 @@ let RPM_LIMIT = 3;
 // 優先順序：Groq > Gemini > OpenAI
 if (GROQ_API_KEY) {
   PROVIDER = 'GROQ';
-  MODEL_NAME = 'llama-3.3-70b-versatile';
-  RPM_LIMIT = 25;  // Groq 免費層 30 RPM，保守用 25
+  MODEL_NAME = 'detecting...';
+  RPM_LIMIT = 25;
 } else if (GEMINI_API_KEY) {
   PROVIDER = 'GEMINI';
   MODEL_NAME = 'detecting...';
@@ -58,20 +72,57 @@ if (GROQ_API_KEY) {
 
 const USE_GPT = PROVIDER !== 'NONE';
 
-// AI 使用機率
-const GPT_SPEAK_PROB = PROVIDER === 'GROQ' ? 0.9 : PROVIDER === 'GEMINI' ? 0.8 : 0.3;
-const GPT_VOTE_PROB = PROVIDER === 'GROQ' ? 0.9 : PROVIDER === 'GEMINI' ? 0.8 : 0.4;
+const GPT_SPEAK_PROB = PROVIDER === 'GROQ' ? 0.9
+  : PROVIDER === 'GEMINI' ? 0.8 : 0.3;
+const GPT_VOTE_PROB = PROVIDER === 'GROQ' ? 0.9
+  : PROVIDER === 'GEMINI' ? 0.8 : 0.4;
 
 console.log(`========================================`);
 console.log(`🐺 狼人殺伺服器啟動`);
 console.log(`🤖 AI Provider: ${PROVIDER}`);
 if (USE_GPT) {
-  console.log(`📦 使用模型: ${MODEL_NAME}`);
+  console.log(`📦 使用模型: 自動偵測中...`);
   console.log(`⚡ 限速: ${RPM_LIMIT} RPM`);
 }
 console.log(`========================================`);
 
-// 偵測 Gemini 模型
+// ============================================================
+// 🔍 Groq 模型偵測
+// ============================================================
+async function detectGroqModel() {
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/models', {
+      headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` },
+    });
+    if (!res.ok) {
+      console.warn('[Groq] 無法取得模型清單', res.status);
+      return null;
+    }
+    const data = await res.json();
+    const available = (data.data || []).map(m => m.id);
+    console.log(`[Groq] 可用模型: ${available.join(', ')}`);
+
+    for (const model of GROQ_MODEL_CANDIDATES) {
+      if (available.includes(model)) {
+        console.log(`[Groq] ✅ 選用模型: ${model}`);
+        return model;
+      }
+    }
+
+    if (available.length > 0) {
+      console.log(`[Groq] ✅ 選用第一個可用模型: ${available[0]}`);
+      return available[0];
+    }
+    return null;
+  } catch (e) {
+    console.warn('[Groq] 偵測錯誤', e.message);
+    return null;
+  }
+}
+
+// ============================================================
+// 🔍 Gemini 模型偵測
+// ============================================================
 async function detectGeminiModel() {
   const apiVersions = ['v1', 'v1beta'];
   for (const version of apiVersions) {
@@ -98,7 +149,9 @@ async function detectGeminiModel() {
   return null;
 }
 
+// ============================================================
 // 🚦 智慧限速
+// ============================================================
 const requestTimestamps = [];
 function getWaitTime() {
   const now = Date.now();
@@ -138,9 +191,10 @@ function enqueue(fn) {
 }
 
 // ============================================================
-// 🚀 Groq API（OpenAI 相容格式）
+// 🚀 Groq API
 // ============================================================
 async function callGroq(messages, maxTokens) {
+  const model = activeGroqModel || MODEL_NAME;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
 
@@ -151,7 +205,7 @@ async function callGroq(messages, maxTokens) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: MODEL_NAME,
+      model,
       messages,
       max_tokens: maxTokens,
       temperature: 0.9,
@@ -291,6 +345,9 @@ function announceDeath(room, player, cause) {
   onPlayerRevealed(room, player);
 }
 
+// ============================================================
+// 🧠 貝氏信念
+// ============================================================
 function initBeliefs(room) {
   const alive = room.players.filter(p => p.alive);
   const wolfCount = room.players.filter(p => p.role === 'WEREWOLF' || p.role === 'SNIPER').length;
@@ -350,6 +407,9 @@ function pickTargetByBelief(room, ai, filterFn) {
   return randomPick(topCandidates).id;
 }
 
+// ============================================================
+// 角色分配
+// ============================================================
 function assignRoles(n) {
   const table = {
     6:{WEREWOLF:1,SEER:1,VILLAGER:4}, 7:{WEREWOLF:1,SEER:1,VILLAGER:5}, 8:{WEREWOLF:1,SEER:1,VILLAGER:6},
@@ -366,6 +426,9 @@ function assignRoles(n) {
 function doctorShotsFor(n) { return n >= 15 ? 4 : 3; }
 function sniperShotsFor(n) { return n >= 15 ? 4 : 3; }
 
+// ============================================================
+// 🎭 AI 個性
+// ============================================================
 const AI_NAMES = ['小狼','阿智','阿呆','小紅','阿明','阿豪','小玉','大頭','阿芬','老張','小陳','阿傑','阿宏','小如','阿文','小婷','阿伯','小胖'];
 function genAiId(room) { let i=1; while(room.players.find(p=>p.id==='ai_'+i)) i++; return 'ai_'+i; }
 
@@ -1716,7 +1779,21 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
   console.log(`🐺 狼人殺伺服器已啟動，port = ${PORT}`);
 
-  if (PROVIDER === 'GEMINI') {
+  if (PROVIDER === 'GROQ') {
+    console.log(`[Groq] 開始偵測可用模型...`);
+    const detected = await detectGroqModel();
+    if (detected) {
+      activeGroqModel = detected;
+      MODEL_NAME = detected;
+      console.log(`========================================`);
+      console.log(`✅ Groq 模型偵測完成`);
+      console.log(`📦 使用模型: ${detected}`);
+      console.log(`========================================`);
+    } else {
+      console.warn(`❌ 沒有找到可用的 Groq 模型，將使用模板模式`);
+      PROVIDER = 'NONE';
+    }
+  } else if (PROVIDER === 'GEMINI') {
     console.log(`[Gemini] 開始偵測可用模型...`);
     const detected = await detectGeminiModel();
     if (detected) {
