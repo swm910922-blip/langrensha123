@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v9.0（雙 AI 支援：Gemini + OpenAI）
+// 狼人殺後端 v9.2（Gemini 自動偵測 + 修復真人總被殺）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -22,39 +22,81 @@ const PHASE_SECONDS = {
 };
 
 // ============================================================
-// 🤖 AI Provider 設定（自動偵測）
+// 🤖 AI Provider 設定
 // ============================================================
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
+// Gemini 候選模型（自動 fallback）
+const GEMINI_MODEL_CANDIDATES = [
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-2.0-flash',
+  'gemini-flash-latest',
+];
+
+let activeGeminiModel = null;
+let activeGeminiApiVersion = 'v1beta';
 let PROVIDER = 'NONE';
 let MODEL_NAME = '';
 let RPM_LIMIT = 3;
 
 if (GEMINI_API_KEY) {
   PROVIDER = 'GEMINI';
-  MODEL_NAME = 'gemini-1.5-flash';
-  RPM_LIMIT = 12;  // Gemini 免費層 15 RPM，保守用 12
+  MODEL_NAME = 'detecting...';
+  RPM_LIMIT = 12;
 } else if (OPENAI_API_KEY) {
   PROVIDER = 'OPENAI';
   MODEL_NAME = 'gpt-4o-mini';
-  RPM_LIMIT = 3;   // Tier 0 只有 3 RPM
+  RPM_LIMIT = 3;
 }
 
 const USE_GPT = PROVIDER !== 'NONE';
 
-// 🔑 GPT 使用機率
-const GPT_SPEAK_PROB = PROVIDER === 'GEMINI' ? 0.8 : 0.3;  // Gemini 用 80%
+const GPT_SPEAK_PROB = PROVIDER === 'GEMINI' ? 0.8 : 0.3;
 const GPT_VOTE_PROB = PROVIDER === 'GEMINI' ? 0.8 : 0.4;
 
 console.log(`========================================`);
 console.log(`🐺 狼人殺伺服器啟動`);
 console.log(`🤖 AI Provider: ${PROVIDER}`);
 if (USE_GPT) {
-  console.log(`📦 使用模型: ${MODEL_NAME}`);
+  console.log(`📦 使用模型: 自動偵測中...`);
   console.log(`⚡ 限速: ${RPM_LIMIT} RPM`);
 }
 console.log(`========================================`);
+
+// ============================================================
+// 🔍 Gemini 模型自動偵測（v1 + v1beta 都試）
+// ============================================================
+async function detectGeminiModel() {
+  const apiVersions = ['v1', 'v1beta'];
+  for (const version of apiVersions) {
+    for (const model of GEMINI_MODEL_CANDIDATES) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/${version}/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+            generationConfig: { maxOutputTokens: 3 }
+          })
+        });
+        if (res.ok) {
+          console.log(`[Gemini] ✅ 可用模型: ${model} (API: ${version})`);
+          activeGeminiApiVersion = version;
+          return model;
+        }
+        if (res.status === 404) continue;
+        const errText = await res.text();
+        console.warn(`[Gemini] ${version}/${model} → ${res.status} ${errText.slice(0, 80)}`);
+      } catch (e) {
+        // 繼續嘗試
+      }
+    }
+  }
+  return null;
+}
 
 // ============================================================
 // 🚦 智慧限速
@@ -101,9 +143,11 @@ function enqueue(fn) {
 }
 
 // ============================================================
-// 🤖 Gemini API 呼叫
+// 🤖 Gemini API
 // ============================================================
 async function callGemini(messages, maxTokens) {
+  if (!activeGeminiModel) return null;
+
   const systemMsg = messages.find(m => m.role === 'system');
   const userMsgs = messages.filter(m => m.role !== 'system');
 
@@ -119,12 +163,10 @@ async function callGemini(messages, maxTokens) {
   };
 
   if (systemMsg) {
-    body.systemInstruction = {
-      parts: [{ text: systemMsg.content }]
-    };
+    body.systemInstruction = { parts: [{ text: systemMsg.content }] };
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
+  const url = `https://generativelanguage.googleapis.com/${activeGeminiApiVersion}/models/${activeGeminiModel}:generateContent?key=${GEMINI_API_KEY}`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
@@ -142,8 +184,7 @@ async function callGemini(messages, maxTokens) {
     return null;
   }
   if (!res.ok) {
-    const errText = await res.text();
-    console.warn('[Gemini]', res.status, errText.slice(0, 200));
+    console.warn('[Gemini]', res.status);
     return null;
   }
 
@@ -152,7 +193,7 @@ async function callGemini(messages, maxTokens) {
 }
 
 // ============================================================
-// 🤖 OpenAI API 呼叫
+// 🤖 OpenAI API
 // ============================================================
 async function callOpenAI(messages, maxTokens) {
   const controller = new AbortController();
@@ -179,8 +220,7 @@ async function callOpenAI(messages, maxTokens) {
     return null;
   }
   if (!res.ok) {
-    const errText = await res.text();
-    console.warn('[OpenAI]', res.status, errText.slice(0, 200));
+    console.warn('[OpenAI]', res.status);
     return null;
   }
 
@@ -293,13 +333,21 @@ function onPlayerRevealed(room, player) {
     }
   });
 }
+
+// ✅ 修復：相同機率時隨機選（不再固定選列表第一個）
 function pickTargetByBelief(room, ai, filterFn) {
   const beliefs = room.aiBeliefs[ai.id] || {};
   let candidates = room.players.filter(p => p.alive && p.id !== ai.id);
   if (filterFn) candidates = candidates.filter(filterFn);
   if (!candidates.length) return null;
-  candidates.sort((a, b) => (beliefs[b.id]?.wolfProb || 0) - (beliefs[a.id]?.wolfProb || 0));
-  return candidates[0].id;
+
+  // 先隨機打亂，再按機率排序（避免同分時固定選同一個）
+  const shuffled = candidates.slice().sort(() => Math.random() - 0.5);
+  shuffled.sort((a, b) => (beliefs[b.id]?.wolfProb || 0) - (beliefs[a.id]?.wolfProb || 0));
+
+  const maxProb = beliefs[shuffled[0].id]?.wolfProb || 0;
+  const topCandidates = shuffled.filter(c => (beliefs[c.id]?.wolfProb || 0) >= maxProb - 0.01);
+  return randomPick(topCandidates).id;
 }
 
 // ============================================================
@@ -368,7 +416,6 @@ function getLastSpeaker(room, ai) {
   }
   return null;
 }
-
 function getTopVotedName(room) {
   const tally = tallyVotes(room);
   const top = topVoted(tally);
@@ -643,7 +690,7 @@ function recordPublicChat(room, fromName, text) {
 }
 
 // ============================================================
-// 🎯 AI 決策核心（✅ 修復 FOLLOW 只挑真人）
+// 🎯 AI 決策核心（✅ FOLLOW 從候選人挑，不再針對真人）
 // ============================================================
 function decideTargetByBelief(room, ai, context) {
   const personality = ai.personality || 'HONEST';
@@ -695,11 +742,8 @@ function decideTargetByBelief(room, ai, context) {
 
   switch (strategy) {
     case 'FOLLOW': {
-      // ✅ 從所有存活玩家中挑
-      const allAlive = room.players.filter(p => p.alive);
-      if (!allAlive.length) return pickTargetByBelief(room, ai, p => candidates.find(c => c.id === p.id));
-      const t = randomPick(allAlive);
-      return candidates.find(c => c.id === t.id)?.id || pickTargetByBelief(room, ai, p => candidates.find(c => c.id === p.id));
+      // ✅ 修復：從候選人中挑（已排除狼人隊友），不再針對真人
+      return randomPick(candidates).id;
     }
     case 'CONTRARIAN': {
       const beliefs = room.aiBeliefs[ai.id] || {};
@@ -720,7 +764,6 @@ async function aiSpeak(room, ai) {
   if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
   if (room.phase === 'GAME_OVER') return;
 
-  // 警察跳警
   if (ai.role === 'SEER' && !ai.hasClaimedSeer) {
     const humanSeers = room.players.filter(p => p.role === 'SEER' && p.alive && !p.isAI);
     if (humanSeers.length === 0) {
@@ -749,7 +792,6 @@ async function aiSpeak(room, ai) {
     }
   }
 
-  // GPT 發言
   if (USE_GPT && Math.random() < GPT_SPEAK_PROB) {
     const text = await aiSpeakWithGPT(room, ai);
     if (text && room.phase === 'DAY_DISCUSS' && ai.alive) {
@@ -758,7 +800,6 @@ async function aiSpeak(room, ai) {
     }
   }
 
-  // 上下文模板發言
   const alive = room.players.filter(p => p.alive && p.id !== ai.id);
   if (!alive.length) return;
 
@@ -1727,5 +1768,27 @@ io.on('connection', socket => {
   });
 });
 
+// ============================================================
+// 🚀 啟動（含 Gemini 模型自動偵測）
+// ============================================================
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🐺 狼人殺伺服器已啟動，port = ${PORT}`));
+
+server.listen(PORT, async () => {
+  console.log(`🐺 狼人殺伺服器已啟動，port = ${PORT}`);
+
+  if (PROVIDER === 'GEMINI') {
+    console.log(`[Gemini] 開始偵測可用模型...`);
+    const detected = await detectGeminiModel();
+    if (detected) {
+      activeGeminiModel = detected;
+      MODEL_NAME = detected;
+      console.log(`========================================`);
+      console.log(`✅ Gemini 模型偵測完成`);
+      console.log(`📦 使用模型: ${detected} (API: ${activeGeminiApiVersion})`);
+      console.log(`========================================`);
+    } else {
+      console.warn(`❌ 沒有找到可用的 Gemini 模型，將使用模板模式`);
+      PROVIDER = 'NONE';
+    }
+  }
+});
