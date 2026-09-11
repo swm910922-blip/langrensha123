@@ -68,8 +68,8 @@ if (GROQ_API_KEY) {
 
 let USE_GPT = PROVIDER !== 'NONE';
 
-const GPT_SPEAK_PROB = PROVIDER === 'GROQ' ? 0.5
-  : PROVIDER === 'GEMINI' ? 0.85 : 0.3;
+const GPT_SPEAK_PROB = PROVIDER === 'GROQ' ? 0.4
+  : PROVIDER === 'GEMINI' ? 0.55 : 0.3;
 const GPT_VOTE_PROB = PROVIDER === 'GROQ' ? 0.6
   : PROVIDER === 'GEMINI' ? 0.85 : 0.4;
 
@@ -816,7 +816,7 @@ ${ctx.myHistory || '（還沒發言過）'}
 
 【你的任務】
 
-用繁體中文，寫 25~50 字的完整句子。
+用繁體中文，寫 15~20 字的完整句子。
 像真的坐在同一桌狼人殺現場一樣接話。
 必須是完整句子，不要只寫兩三個字。
 
@@ -1229,20 +1229,18 @@ async function runAiDiscussion(room) {
   room.aiDiscussionSpoken = new Set();
 
   try {
-    await new Promise(resolve => setTimeout(resolve, 1800));
+    // 白天開始後先等一下
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     while (room.phase === 'DAY_DISCUSS') {
       const ais = room.players.filter(p => p.isAI && p.alive);
       if (!ais.length) break;
 
-      if (room.aiDiscussionSpoken.size >= ais.length) {
-        room.aiDiscussionSpoken.clear();
-        await new Promise(resolve => setTimeout(resolve, 1800));
-        if (room.phase !== 'DAY_DISCUSS') break;
-      }
+      // ✅ 每個 AI 一天只發言一次，全部講完就結束
+      if (room.aiDiscussionSpoken.size >= ais.length) break;
 
       const nextAi = ais.find(ai => !room.aiDiscussionSpoken.has(ai.id));
-      if (!nextAi) continue;
+      if (!nextAi) break;
 
       room.aiDiscussionSpoken.add(nextAi.id);
 
@@ -1251,7 +1249,8 @@ async function runAiDiscussion(room) {
       await aiSpeak(room, nextAi);
 
       if (room.phase === 'DAY_DISCUSS') {
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        // ✅ 間隔拉長到 4 秒，讓前端有時間顯示
+        await new Promise(resolve => setTimeout(resolve, 4000));
       }
     }
   } catch (err) {
