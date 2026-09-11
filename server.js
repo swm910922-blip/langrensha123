@@ -1,7 +1,6 @@
 // ============================================================
-// 狼人殺後端 v11.2（立場記憶 + 對話一致性 + Gemini 重試）
+// 狼人殺後端 v11.3
 // ============================================================
-require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
@@ -39,9 +38,9 @@ const GROQ_MODEL_CANDIDATES = [
 ];
 
 const GEMINI_MODEL_CANDIDATES = [
-  'gemini-3.6-flash',
-  'gemini-3.5-flash',
-  'gemini-3.1-flash-lite',
+  'gemini-3.1-flash-lite',      // ✅ 最穩、最快
+  'gemini-3.5-flash',           // ✅ 次穩
+  'gemini-3.6-flash',           // ✅ 品質最好
   'gemini-flash-latest',
   'gemini-flash-lite-latest',
 ];
@@ -170,7 +169,7 @@ async function detectGeminiModel() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-            generationConfig: { maxOutputTokens: 3 }
+            generationConfig: { maxOutputTokens: 20 }
           })
         });
 
@@ -235,7 +234,7 @@ function enqueue(fn) {
 }
 
 // ============================================================
-// 🚀 Groq API（含 429 重試）
+// 🚀 Groq API（含重試）
 // ============================================================
 async function callGroq(messages, maxTokens) {
   const model = activeGroqModel || MODEL_NAME;
@@ -244,7 +243,7 @@ async function callGroq(messages, maxTokens) {
 
   for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    const timeout = setTimeout(() => controller.abort(), 30000);
     try {
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -269,7 +268,6 @@ async function callGroq(messages, maxTokens) {
         lastErr = 'rate_limit';
         continue;
       }
-
       if (res.status === 503 || res.status === 500 || res.status === 502) {
         const wait = (2 ** attempt) + Math.random();
         console.warn(`[Groq] ${res.status} → 等待 ${wait.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY})`);
@@ -277,7 +275,6 @@ async function callGroq(messages, maxTokens) {
         lastErr = `http_${res.status}`;
         continue;
       }
-
       if (!res.ok) {
         console.warn('[Groq]', res.status, (await res.text()).slice(0, 150));
         return null;
@@ -301,7 +298,7 @@ async function callGroq(messages, maxTokens) {
 }
 
 // ============================================================
-// 🤖 Gemini API（含 429 / 503 重試）
+// 🤖 Gemini API（含重試 + 關思考）
 // ============================================================
 async function callGemini(messages, maxTokens) {
   if (!activeGeminiModel) return null;
@@ -312,7 +309,12 @@ async function callGemini(messages, maxTokens) {
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: m.content }]
     })),
-    generationConfig: { maxOutputTokens: maxTokens, temperature: 0.9 }
+    generationConfig: {
+      maxOutputTokens: maxTokens,
+      temperature: 0.9,
+      // ✅ 關閉思考模式（3.x 推理模型適用），避免吃掉 token
+      thinkingConfig: { thinkingBudget: 0 }
+    }
   };
   if (systemMsg) body.systemInstruction = { parts: [{ text: systemMsg.content }] };
 
@@ -323,7 +325,8 @@ async function callGemini(messages, maxTokens) {
 
   for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    // ✅ 從 30 秒 → 45 秒
+    const timeout = setTimeout(() => controller.abort(), 45000);
 
     try {
       const res = await fetch(url, {
@@ -341,7 +344,6 @@ async function callGemini(messages, maxTokens) {
         lastErr = 'rate_limit';
         continue;
       }
-
       if (res.status === 503 || res.status === 500 || res.status === 502) {
         const wait = (2 ** attempt) + Math.random();
         console.warn(`[Gemini] ${res.status} → 等待 ${wait.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY})`);
@@ -349,15 +351,20 @@ async function callGemini(messages, maxTokens) {
         lastErr = `http_${res.status}`;
         continue;
       }
-
       if (!res.ok) {
-        console.warn('[Gemini]', res.status, (await res.text()).slice(0, 150));
+        const errText = await res.text();
+        // thinkingConfig 不支援時，自動移除並重試一次
+        if (res.status === 400 && errText.includes('thinkingConfig') && attempt === 0) {
+          console.warn('[Gemini] thinkingConfig 不支援，移除後重試');
+          delete body.generationConfig.thinkingConfig;
+          continue;
+        }
+        console.warn('[Gemini]', res.status, errText.slice(0, 150));
         return null;
       }
 
       const data = await res.json();
       return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
-
     } catch (e) {
       clearTimeout(timeout);
       lastErr = e.message;
@@ -369,7 +376,6 @@ async function callGemini(messages, maxTokens) {
       }
     }
   }
-
   console.warn(`[Gemini] 放棄重試，最後錯誤：${lastErr}`);
   return null;
 }
@@ -379,7 +385,7 @@ async function callGemini(messages, maxTokens) {
 // ============================================================
 async function callOpenAI(messages, maxTokens) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
+  const timeout = setTimeout(() => controller.abort(), 20000);
   try {
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -810,8 +816,9 @@ ${ctx.myHistory || '（還沒發言過）'}
 
 【你的任務】
 
-用繁體中文、25~45 字，
+用繁體中文，寫 25~50 字的完整句子。
 像真的坐在同一桌狼人殺現場一樣接話。
+必須是完整句子，不要只寫兩三個字。
 
 你不是獨立發言的旁白，而是要回應前面的人。
 
@@ -827,12 +834,12 @@ ${ctx.myHistory || '（還沒發言過）'}
 9. 必須提到至少一位玩家名字。
 10. 不要重複自己之前說過的原句。
 11. 必須符合自己的個性。
-12. 直接輸出發言，不要引號。`;
+12. 直接輸出發言，不要引號、不要條列、不要換行。`;
 
   return await askGPT([
     { role: 'system', content: '你是狼人殺玩家，依個性發言，並保持立場一致。用繁體中文。' },
     { role: 'user', content: prompt }
-  ], 120);
+  ], 600);   // ✅ 從 120 提高到 600
 }
 
 // ============================================================
@@ -866,12 +873,12 @@ ${ctx.others.map(p => `- ${p.name}`).join('\n')}
 ⚠️ 重要：如果你之前懷疑過某人，優先投他。
 
 回傳 JSON：{"target": "玩家名字"}
-只回 JSON。`;
+只回 JSON，不要有其他文字。`;
 
   const text = await askGPT([
-    { role: 'system', content: '回傳 JSON。' },
+    { role: 'system', content: '只回傳 JSON。' },
     { role: 'user', content: prompt }
-  ], 60);
+  ], 200);   // ✅ 從 60 提高到 200
 
   if (!text) return null;
   try {
@@ -999,7 +1006,6 @@ function decideTargetByBelief(room, ai, context) {
 async function aiSpeak(room, ai) {
   if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
 
-  // 1. 警察主動宣告（僅一次）
   if (ai.role === 'SEER' && !ai.hasClaimedSeer) {
     const humanSeers = room.players.filter(p => p.role === 'SEER' && p.alive && !p.isAI);
     if (humanSeers.length === 0) {
@@ -1029,7 +1035,6 @@ async function aiSpeak(room, ai) {
     }
   }
 
-  // 2. GPT 發言
   if (USE_GPT && Math.random() < GPT_SPEAK_PROB) {
     const text = await aiSpeakWithGPT(room, ai);
     if (text && room.phase === 'DAY_DISCUSS' && ai.alive) {
@@ -1043,7 +1048,6 @@ async function aiSpeak(room, ai) {
     }
   }
 
-  // 3. 模板 fallback
   const alive = room.players.filter(p => p.alive && p.id !== ai.id);
   if (!alive.length) return;
 
@@ -1247,7 +1251,7 @@ async function runAiDiscussion(room) {
       await aiSpeak(room, nextAi);
 
       if (room.phase === 'DAY_DISCUSS') {
-        await new Promise(resolve => setTimeout(resolve, 2500));
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
     }
   } catch (err) {
