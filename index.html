@@ -104,6 +104,8 @@ input{font-family:inherit}
 .pcard .needlebadge{position:absolute;top:6px;right:6px;background:var(--doctor);color:#082f49;
   border-radius:99px;padding:1px 7px;font-size:10px;font-weight:800;}
 .pcard .voters{font-size:9.5px;color:var(--gold);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;letter-spacing:.3px;line-height:1.3;padding:0 2px;}
+/* ✅ 新增：顯示「我投給誰」在投票者頭上 */
+.pcard .myvote{font-size:10px;color:var(--accent);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;letter-spacing:.3px;line-height:1.3;padding:0 2px;font-weight:700;}
 .pcard .matetag{position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font-size:9px;padding:1px 6px;border-radius:99px;font-weight:700;letter-spacing:.5px;white-space:nowrap;}
 .pcard .matetag.seer{background:rgba(34,211,238,.2);color:var(--doctor);border:1px solid rgba(34,211,238,.5)}
 .pcard .matetag.wolf{background:rgba(248,113,113,.2);color:var(--wolf);border:1px solid rgba(248,113,113,.5)}
@@ -222,7 +224,7 @@ const ROLE_INFO = {
 let state = {
   screen: 'lobby', roomId: null, myId: null, players: [], isHost: false,
   phase: 'LOBBY', day: 0, myRole: null, phaseData: {}, selectedTarget: null,
-  myVote: null, chats: { PUBLIC: [], WOLF: [], EVIL: [], POLICE: [], DEAD: [] },
+  myVote: undefined, chats: { PUBLIC: [], WOLF: [], EVIL: [], POLICE: [], DEAD: [] },
   chatTab: 'PUBLIC', gameOver: null, endsAt: null,
   doctorShotsLeft: 0, sniperShotsLeft: 0,
   teammateVotes: {},
@@ -246,7 +248,7 @@ function leaveRoom(){
   socket.emit('leave_room');
   state.screen = 'lobby'; state.roomId = null; state.players = [];
   state.isHost = false; state.phase = 'LOBBY'; state.myRole = null;
-  state.gameOver = null; state.selectedTarget = null; state.myVote = null;
+  state.gameOver = null; state.selectedTarget = null; state.myVote = undefined;
   state.phaseData = {}; state.chats = { PUBLIC: [], WOLF: [], EVIL: [], POLICE: [], DEAD: [] };
   state.teammateVotes = {};
   state.seerMates = []; state.wolfMates = [];
@@ -510,7 +512,7 @@ function phaseSub(p){
     NIGHT_SNIPER:'選擇一名玩家狙擊（不能選自己）',
     DAY_ANNOUNCE:'昨晚有人倒牌…',
     DAY_DISCUSS:'依序發言，找出潛藏的邪惡方',
-    DAY_VOTE:'點擊玩家頭像投票，最高票者出局',
+    DAY_VOTE:'點擊玩家頭像投票，最高票者出局（時間內可改票）',
     GAME_OVER:'本局已結束',
   };
   return m[p] || '';
@@ -534,6 +536,15 @@ function playerCard(p){
   else if (isWolfMate) mateTag = `<span class="matetag wolf">🐺 同夥</span>`;
 
   const detail = state.voteDetail || state.phaseData?.voteDetail || {};
+  const isVotePhase = state.phase === 'DAY_VOTE';
+
+  // ✅ 新增：這張卡的主人投給了誰（顯示在他自己頭上）
+  const myVoteTarget = detail[p.id];
+  const myVoteHtml = (isVotePhase && Object.prototype.hasOwnProperty.call(detail, p.id))
+    ? `<div class="myvote">→ ${myVoteTarget ? '投給 ' + nameOf(myVoteTarget) : '棄票'}</div>`
+    : '';
+
+  // 誰投給了這張卡的主人
   const voterNames = Object.keys(detail)
     .filter(voterId => detail[voterId] === p.id)
     .map(voterId => nameOf(voterId));
@@ -550,6 +561,7 @@ function playerCard(p){
       <div class="avatar">${p.isAI?'🤖':p.name.slice(0,1).toUpperCase()}</div>
       <div class="pname">${p.name}</div>
       <div class="pmeta">${!p.alive ? '已出局' : p.isHost ? '房主' : p.isAI ? '🤖 AI' : ''}</div>
+      ${myVoteHtml}
       ${votersHtml}
       ${mateTag}
     </div>
@@ -669,19 +681,27 @@ function ActionPanelHTML(){
           <button class="btn ghost" data-action="sniper_skip">不開槍</button>
         </div>`;
     }
+    // ✅ 改動：允許時間內改票
     case 'DAY_VOTE': {
-      if(state.myVote) {
-        return `<div class="desc">✅ 你已投票給 <b>${nameOf(state.myVote)}</b><br/>等待其他玩家…</div>${teammatePanel}`;
-      }
+      const hasVoted = state.myVote !== undefined && state.myVote !== null
+        ? true
+        : Object.prototype.hasOwnProperty.call(state.voteDetail || {}, state.myId);
+      const votedName = (state.myVote !== undefined && state.myVote !== null) ? nameOf(state.myVote) : '';
       return `
         <div class="title">🗳 投票放逐</div>
-        <div class="desc">點擊玩家頭像投票，最高票者將被放逐。</div>
+        <div class="desc">${
+          hasVoted
+            ? (votedName ? `✅ 你目前投給 <b>${votedName}</b><br/>時間內仍可改投其他玩家。` : `✅ 你目前選擇棄票<br/>時間內仍可改投。`)
+            : '點擊玩家頭像投票，最高票者將被放逐。'
+        }</div>
         ${teammatePanel}
         <div class="btns">
           <button class="btn gold" data-action="vote_confirm" ${state.selectedTarget?'':'disabled'}>
-            ${state.selectedTarget ? '投票給 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
+            ${state.selectedTarget
+              ? (hasVoted ? '改投 ' + nameOf(state.selectedTarget) : '投票給 ' + nameOf(state.selectedTarget))
+              : '請先選擇目標'}
           </button>
-          <button class="btn ghost" data-action="vote_skip">棄票</button>
+          <button class="btn ghost" data-action="vote_skip">${hasVoted ? '改為棄票' : '棄票'}</button>
         </div>`;
     }
     case 'DAY_DISCUSS':
@@ -714,6 +734,7 @@ function bindActionButtons(root){
         case 'doctor_skip':    socket.emit('doctor_skip'); break;
         case 'sniper_shoot':   socket.emit('sniper_shoot', { targetId: t }); break;
         case 'sniper_skip':    socket.emit('sniper_skip'); break;
+        // ✅ 改動：投票可改，隨時更新
         case 'vote_confirm':   state.myVote = t; socket.emit('day_vote', { targetId: t }); break;
         case 'vote_skip':      state.myVote = null; socket.emit('day_vote', { targetId: null }); break;
       }
@@ -813,6 +834,7 @@ socket.on('game_started', ({ myRole, players, doctorShots, sniperShots, seerMate
   state.chatTab = myRole === 'WEREWOLF' ? 'WOLF' : myRole === 'SNIPER' ? 'EVIL' : myRole === 'SEER' ? 'POLICE' : 'PUBLIC';
   state.teammateVotes = {};
   state.voteDetail = {};
+  state.myVote = undefined;
   render();
 
   const info = ROLE_INFO[myRole];
@@ -829,7 +851,7 @@ socket.on('game_started', ({ myRole, players, doctorShots, sniperShots, seerMate
 socket.on('phase_changed', payload => {
   state.phase = payload.phase; state.day = payload.day;
   state.endsAt = payload.endsAt; state.phaseData = payload.data || {};
-  state.myVote = null; state.selectedTarget = null;
+  state.myVote = undefined; state.selectedTarget = null;
   state.voteDetail = payload.data?.voteDetail || {};
   state.teammateVotes = payload.data?.teammateVotes || {};
 
@@ -856,9 +878,16 @@ socket.on('seer_teammate_votes', ({ votes }) => {
   render();
 });
 
+// ✅ 改動：同步自己的投票狀態，時間內可改
 socket.on('vote_updated', ({ votes, voteDetail }) => {
   state.phaseData.votes = votes;
-  if (voteDetail) state.voteDetail = voteDetail;
+  if (voteDetail) {
+    state.voteDetail = voteDetail;
+    // 用 hasOwnProperty 判斷自己有沒有投過（undefined = 未投，null = 棄票，ID = 投某人）
+    if (Object.prototype.hasOwnProperty.call(voteDetail, state.myId)) {
+      state.myVote = voteDetail[state.myId];
+    }
+  }
   render();
 });
 
