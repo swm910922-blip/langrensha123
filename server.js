@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v9.3（Gemini + 房主調整白天發言時間）
+// 狼人殺後端 v10.0（Groq + Gemini + OpenAI 三家自動偵測）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -22,8 +22,9 @@ const PHASE_SECONDS = {
 };
 
 // ============================================================
-// 🤖 AI Provider 設定
+// 🤖 AI Provider 設定（自動偵測優先順序）
 // ============================================================
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
@@ -40,7 +41,12 @@ let PROVIDER = 'NONE';
 let MODEL_NAME = '';
 let RPM_LIMIT = 3;
 
-if (GEMINI_API_KEY) {
+// 優先順序：Groq > Gemini > OpenAI
+if (GROQ_API_KEY) {
+  PROVIDER = 'GROQ';
+  MODEL_NAME = 'llama-3.3-70b-versatile';
+  RPM_LIMIT = 25;  // Groq 免費層 30 RPM，保守用 25
+} else if (GEMINI_API_KEY) {
   PROVIDER = 'GEMINI';
   MODEL_NAME = 'detecting...';
   RPM_LIMIT = 12;
@@ -51,18 +57,21 @@ if (GEMINI_API_KEY) {
 }
 
 const USE_GPT = PROVIDER !== 'NONE';
-const GPT_SPEAK_PROB = PROVIDER === 'GEMINI' ? 0.8 : 0.3;
-const GPT_VOTE_PROB = PROVIDER === 'GEMINI' ? 0.8 : 0.4;
+
+// AI 使用機率
+const GPT_SPEAK_PROB = PROVIDER === 'GROQ' ? 0.9 : PROVIDER === 'GEMINI' ? 0.8 : 0.3;
+const GPT_VOTE_PROB = PROVIDER === 'GROQ' ? 0.9 : PROVIDER === 'GEMINI' ? 0.8 : 0.4;
 
 console.log(`========================================`);
 console.log(`🐺 狼人殺伺服器啟動`);
 console.log(`🤖 AI Provider: ${PROVIDER}`);
 if (USE_GPT) {
-  console.log(`📦 使用模型: 自動偵測中...`);
+  console.log(`📦 使用模型: ${MODEL_NAME}`);
   console.log(`⚡ 限速: ${RPM_LIMIT} RPM`);
 }
 console.log(`========================================`);
 
+// 偵測 Gemini 模型
 async function detectGeminiModel() {
   const apiVersions = ['v1', 'v1beta'];
   for (const version of apiVersions) {
@@ -83,8 +92,6 @@ async function detectGeminiModel() {
           return model;
         }
         if (res.status === 404) continue;
-        const errText = await res.text();
-        console.warn(`[Gemini] ${version}/${model} → ${res.status} ${errText.slice(0, 80)}`);
       } catch (e) {}
     }
   }
@@ -130,6 +137,45 @@ function enqueue(fn) {
   });
 }
 
+// ============================================================
+// 🚀 Groq API（OpenAI 相容格式）
+// ============================================================
+async function callGroq(messages, maxTokens) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${GROQ_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: MODEL_NAME,
+      messages,
+      max_tokens: maxTokens,
+      temperature: 0.9,
+    }),
+    signal: controller.signal,
+  });
+  clearTimeout(timeout);
+
+  if (res.status === 429) {
+    console.warn('[Groq] 429 → 改用模板');
+    return null;
+  }
+  if (!res.ok) {
+    console.warn('[Groq]', res.status, (await res.text()).slice(0, 150));
+    return null;
+  }
+
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content?.trim() || null;
+}
+
+// ============================================================
+// 🤖 Gemini API
+// ============================================================
 async function callGemini(messages, maxTokens) {
   if (!activeGeminiModel) return null;
   const systemMsg = messages.find(m => m.role === 'system');
@@ -158,6 +204,9 @@ async function callGemini(messages, maxTokens) {
   return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
 }
 
+// ============================================================
+// 🤖 OpenAI API
+// ============================================================
 async function callOpenAI(messages, maxTokens) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
@@ -179,10 +228,14 @@ async function callOpenAI(messages, maxTokens) {
   return data.choices?.[0]?.message?.content?.trim() || null;
 }
 
+// ============================================================
+// 🎯 統一介面
+// ============================================================
 async function askGPT(messages, maxTokens = 120) {
   if (!USE_GPT) return null;
   return enqueue(async () => {
     try {
+      if (PROVIDER === 'GROQ') return await callGroq(messages, maxTokens);
       if (PROVIDER === 'GEMINI') return await callGemini(messages, maxTokens);
       if (PROVIDER === 'OPENAI') return await callOpenAI(messages, maxTokens);
       return null;
@@ -238,7 +291,6 @@ function announceDeath(room, player, cause) {
   onPlayerRevealed(room, player);
 }
 
-// 🧠 貝氏信念
 function initBeliefs(room) {
   const alive = room.players.filter(p => p.alive);
   const wolfCount = room.players.filter(p => p.role === 'WEREWOLF' || p.role === 'SNIPER').length;
@@ -855,7 +907,7 @@ function scheduleAiActions(room, phase) {
         if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
         if (room.phase === 'GAME_OVER') return;
         await aiSpeak(room, ai);
-      }, 2000 + idx * 5000);
+      }, 2000 + idx * 4000);
     });
   }
 
@@ -964,7 +1016,7 @@ function scheduleAiActions(room, phase) {
           clearTimeout(room.timer);
           setTimeout(() => resolveVote(room), 800);
         }
-      }, 2000 + idx * 4000);
+      }, 2000 + idx * 3500);
     });
   }
 }
@@ -1084,7 +1136,6 @@ function setPhase(room, phase) {
   clearTimeout(room.timer);
   room.phase = phase;
 
-  // 🔑 白天討論用自訂時間
   const sec = phase === 'DAY_DISCUSS'
     ? (room.dayDiscussTime || 120)
     : (PHASE_SECONDS[phase] || 20);
@@ -1436,7 +1487,6 @@ io.on('connection', socket => {
     systemMsg(room, 'AI 玩家「' + ai.name + '」已被移除。');
   });
 
-  // 🔑 房主調整白天發言時間
   socket.on('set_day_time', (payload) => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
