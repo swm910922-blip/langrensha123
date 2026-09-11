@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v10.1（Groq 自動偵測 + Gemini + OpenAI）
+// 狼人殺後端 v11.0（立場記憶 + 對話一致性 + Groq 自動偵測）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -28,19 +28,16 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 
-// Groq 候選模型
 const GROQ_MODEL_CANDIDATES = [
+  'openai/gpt-oss-120b',
+  'groq/compound',
+  'qwen/qwen3.8-27b',
+  'openai/gpt-oss-20b',
+  'groq/compound-mini',
   'llama-3.3-70b-versatile',
-  'llama-3.3-70b-specdec',
-  'llama-3.1-70b-versatile',
   'llama-3.1-8b-instant',
-  'llama3-70b-8192',
-  'llama3-8b-8192',
-  'mixtral-8x7b-32768',
-  'gemma2-9b-it',
 ];
 
-// Gemini 候選模型
 const GEMINI_MODEL_CANDIDATES = [
   'gemini-2.5-flash',
   'gemini-2.5-pro',
@@ -55,7 +52,6 @@ let PROVIDER = 'NONE';
 let MODEL_NAME = '';
 let RPM_LIMIT = 3;
 
-// 優先順序：Groq > Gemini > OpenAI
 if (GROQ_API_KEY) {
   PROVIDER = 'GROQ';
   MODEL_NAME = 'detecting...';
@@ -102,8 +98,7 @@ async function detectGroqModel() {
     const allModels = (data.data || []).map(m => m.id);
     console.log(`[Groq] 所有可用模型: ${allModels.join(', ')}`);
 
-    // 🔑 過濾：排除 TTS / Whisper / 語音相關模型
-    const excludeKeywords = ['tts', 'whisper', 'orpheus', 'playai', 'audio', 'speech', 'voice'];
+    const excludeKeywords = ['tts', 'whisper', 'orpheus', 'playai', 'audio', 'speech', 'voice', 'prompt-guard', 'safeguard'];
     const chatModels = allModels.filter(id => {
       const lower = id.toLowerCase();
       return !excludeKeywords.some(kw => lower.includes(kw));
@@ -111,7 +106,6 @@ async function detectGroqModel() {
 
     console.log(`[Groq] 聊天模型: ${chatModels.join(', ')}`);
 
-    // 從候選清單挑
     for (const model of GROQ_MODEL_CANDIDATES) {
       if (chatModels.includes(model)) {
         console.log(`[Groq] ✅ 選用模型: ${model}`);
@@ -119,7 +113,6 @@ async function detectGroqModel() {
       }
     }
 
-    // 沒匹配 → 選第一個聊天模型
     if (chatModels.length > 0) {
       console.log(`[Groq] ✅ 選用第一個聊天模型: ${chatModels[0]}`);
       return chatModels[0];
@@ -132,6 +125,7 @@ async function detectGroqModel() {
     return null;
   }
 }
+
 // ============================================================
 // 🔍 Gemini 模型偵測
 // ============================================================
@@ -565,6 +559,25 @@ function contextualSpeech(room, ai, category, targetName) {
   return text;
 }
 
+// 🔑 記錄 AI 的發言和立場
+function recordAiSpeech(room, ai, text) {
+  if (!ai.previousSpeeches) ai.previousSpeeches = [];
+  ai.previousSpeeches.push({ day: room.day, text: text });
+  if (ai.previousSpeeches.length > 5) ai.previousSpeeches.shift();
+
+  // 從發言中提取立場
+  const suspects = room.players.filter(p => p.alive && p.id !== ai.id && text.includes(p.name));
+  if (suspects.length > 0) {
+    const suspect = suspects[0];
+    if (/懷疑|投|是狼|有問題|可疑|怪/.test(text)) {
+      ai.stance = { type: 'suspect', targetId: suspect.id, targetName: suspect.name };
+    } else if (/相信|支持|好人|清白/.test(text)) {
+      ai.stance = { type: 'trust', targetId: suspect.id, targetName: suspect.name };
+    }
+  }
+}
+
+// 🔑 建構 AI 上下文（含立場與歷史）
 function buildAiContext(room, ai) {
   const alive = room.players.filter(p => p.alive);
   const others = alive.filter(p => p.id !== ai.id);
@@ -615,12 +628,38 @@ function buildAiContext(room, ai) {
     .map(x => `  ${x.name}：${Math.round(x.prob * 100)}% 是狼`)
     .join('\n');
 
-  return { campDesc, checkInfo, chatLog, playerList, suspLines, alive, others, deathLog };
+  // 立場
+  let stanceInfo = '';
+  if (ai.stance) {
+    const t = ai.stance.type === 'suspect' ? '懷疑' : '支持';
+    stanceInfo = `你目前${t} ${ai.stance.targetName}。`;
+  }
+
+  // 歷史發言
+  let myHistory = '';
+  if (ai.previousSpeeches && ai.previousSpeeches.length) {
+    myHistory = ai.previousSpeeches.map(s => `  第 ${s.day} 天：${s.text}`).join('\n');
+  }
+
+  // 上次投票
+  let myLastVote = '';
+  if (ai.lastVote) {
+    myLastVote = `你上次投票給 ${nameOf(room, ai.lastVote)}。`;
+  }
+
+  return {
+    campDesc, checkInfo, chatLog, playerList, suspLines, alive, others, deathLog,
+    stanceInfo, myHistory, myLastVote,
+  };
 }
 
+// ============================================================
+// 🗣 GPT 發言（含立場一致）
+// ============================================================
 async function aiSpeakWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
   const tone = PERSONALITY_TONE[ai.personality] || '';
+
   const prompt = `你正在玩狼人殺，扮演 ${ai.name}。
 
 【角色】${ctx.campDesc}
@@ -639,18 +678,35 @@ ${ctx.chatLog}
 【你懷疑】
 ${ctx.suspLines || '（暫無明顯懷疑）'}
 
-請用繁體中文、25~40 字，發言風格符合你的個性。
-⚠️ 必須提到至少一位玩家名字。
-⚠️ 直接輸出，不要引號。`;
+【你目前的立場】
+${ctx.stanceInfo || '（尚未表態）'}
+${ctx.myLastVote || ''}
+
+【你之前說過的話】
+${ctx.myHistory || '（還沒發言過）'}
+
+【你的任務】
+用繁體中文、25~40 字，發言風格符合你的個性。
+
+⚠️ 重要規則：
+1. 如果你之前已經懷疑某人，這次要保持一致（不要突然改口支持他）
+2. 如果你要改變立場，必須說明「為什麼改變」（例如：他的新發言很可疑）
+3. 必須提到至少一位玩家名字
+4. 不要重複你之前說過的話
+5. 直接輸出你的發言，不要引號`;
 
   return await askGPT([
-    { role: 'system', content: '你是狼人殺玩家，依個性發言，用繁體中文。' },
+    { role: 'system', content: '你是狼人殺玩家，依個性發言，並保持立場一致。用繁體中文。' },
     { role: 'user', content: prompt }
   ], 120);
 }
 
+// ============================================================
+// 🗳 GPT 投票（含立場一致）
+// ============================================================
 async function aiVoteWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
+
   const prompt = `你正在玩狼人殺，要投票放逐一位玩家。
 
 【角色】${ctx.campDesc}
@@ -664,8 +720,15 @@ ${ctx.chatLog}
 【你懷疑】
 ${ctx.suspLines || '（暫無）'}
 
-從以下選一個：
+【你目前的立場】
+${ctx.stanceInfo || '（尚未表態）'}
+${ctx.myLastVote || ''}
+
+【你的任務】
+從以下選一個投票對象：
 ${ctx.others.map(p => `- ${p.name}`).join('\n')}
+
+⚠️ 重要：如果你之前懷疑過某人，優先投他。
 
 回傳 JSON：{"target": "玩家名字"}
 只回 JSON。`;
@@ -745,6 +808,12 @@ function decideTargetByBelief(room, ai, context) {
   if (!candidates.length) return null;
 
   if (context === 'VOTE') {
+    // 立場一致：優先投自己懷疑的人
+    if (ai.stance && ai.stance.type === 'suspect') {
+      const target = candidates.find(p => p.id === ai.stance.targetId);
+      if (target && Math.random() < 0.7) return target.id;
+    }
+
     if (personality === 'VENGEFUL' && ai.revengeTarget) {
       const target = candidates.find(p => p.id === ai.revengeTarget);
       if (target) return target.id;
@@ -809,8 +878,10 @@ async function aiSpeak(room, ai) {
         if (knownWolfId) {
           const wolfName = nameOf(room, knownWolfId);
           const speech = `我是警察！我查驗了 ${wolfName}，他是狼人！請大家跟我一起投他！`;
+          recordAiSpeech(room, ai, speech);
           io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: speech });
           ai.hasClaimedSeer = true;
+          ai.stance = { type: 'suspect', targetId: knownWolfId, targetName: wolfName };
           Object.keys(room.aiBeliefs || {}).forEach(otherAiId => {
             if (otherAiId === ai.id) return;
             updateBelief(room, otherAiId, knownWolfId, +0.55, `${ai.name} 跳警指認`);
@@ -824,6 +895,7 @@ async function aiSpeak(room, ai) {
   if (USE_GPT && Math.random() < GPT_SPEAK_PROB) {
     const text = await aiSpeakWithGPT(room, ai);
     if (text && room.phase === 'DAY_DISCUSS' && ai.alive) {
+      recordAiSpeech(room, ai, text);
       io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text });
       return;
     }
@@ -841,6 +913,7 @@ async function aiSpeak(room, ai) {
   else if (ai.personality === 'IMPULSIVE' || ai.personality === 'LOYAL') category = 'FOLLOW';
 
   const text = contextualSpeech(room, ai, category, target.name);
+  recordAiSpeech(room, ai, text);
   io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text });
 }
 
@@ -1077,6 +1150,7 @@ function scheduleAiActions(room, phase) {
           target = await aiVoteWithGPT(room, ai);
         }
         if (!target) target = decideTargetByBelief(room, ai, 'VOTE');
+        ai.lastVote = target;
 
         if (room.phase !== 'DAY_VOTE' || room.votes[ai.id] !== undefined) return;
         room.votes[ai.id] = target;
@@ -1276,6 +1350,9 @@ function startGame(room) {
     p.hasClaimedSeer = false;
     p.revengeTarget = null;
     p.loyalTarget = null;
+    p.stance = null;
+    p.previousSpeeches = [];
+    p.lastVote = null;
   });
 
   const loyalAis = room.players.filter(p => p.isAI && p.personality === 'LOYAL');
@@ -1496,7 +1573,7 @@ io.on('connection', socket => {
       doctorShotsLeft:0, sniperShotsLeft:0, emptyShotCount:{},
       aiIntel:{}, aiBeliefs:{}, recentPublicChat:[], speakCount:{}, voteHistory:[], timer:null, endsAt:null,
     };
-    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:true, role:null, isAI:false, canSpeakInPublic:false, hasClaimedSeer:false, revengeTarget:null, loyalTarget:null });
+    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:true, role:null, isAI:false, canSpeakInPublic:false, hasClaimedSeer:false, revengeTarget:null, loyalTarget:null, stance:null, previousSpeeches:[], lastVote:null });
     rooms.set(roomId, room);
     socket.join(roomId);
     socket.data.roomId = roomId;
@@ -1514,7 +1591,7 @@ io.on('connection', socket => {
     if (room.players.length >= 18) return cb && cb({ ok:false, error:'房間已滿' });
     if (room.players.some(p => p.name === nickname)) return cb && cb({ ok:false, error:'暱稱已被使用' });
 
-    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:false, role:null, isAI:false, canSpeakInPublic:false, hasClaimedSeer:false, revengeTarget:null, loyalTarget:null });
+    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:false, role:null, isAI:false, canSpeakInPublic:false, hasClaimedSeer:false, revengeTarget:null, loyalTarget:null, stance:null, previousSpeeches:[], lastVote:null });
     socket.join(roomId);
     socket.data.roomId = roomId;
     if (cb) cb({ ok:true });
@@ -1538,7 +1615,7 @@ io.on('connection', socket => {
     room.players.push({
       id: genAiId(room), name, alive:true, isHost:false, role:null, isAI:true,
       canSpeakInPublic:false, hasClaimedSeer:false, personality,
-      revengeTarget:null, loyalTarget:null,
+      revengeTarget:null, loyalTarget:null, stance:null, previousSpeeches:[], lastVote:null,
     });
     if (cb) cb({ ok:true });
     emitRoomState(room);
@@ -1596,7 +1673,7 @@ io.on('connection', socket => {
     room.seerChecks = {}; room.seerVotes = {}; room.seerResolved = false; room.pendingDeaths = [];
     room.doctorTarget = null; room.sniperTarget = null; room.emptyShotCount = {};
     room.aiIntel = {}; room.aiBeliefs = {}; room.recentPublicChat = []; room.speakCount = {}; room.voteHistory = [];
-    room.players.forEach(p => { p.alive = true; p.role = null; p.deathCause = null; p.canSpeakInPublic = false; p.hasClaimedSeer = false; p.revengeTarget = null; p.loyalTarget = null; });
+    room.players.forEach(p => { p.alive = true; p.role = null; p.deathCause = null; p.canSpeakInPublic = false; p.hasClaimedSeer = false; p.revengeTarget = null; p.loyalTarget = null; p.stance = null; p.previousSpeeches = []; p.lastVote = null; });
     emitRoomState(room);
     broadcastPlayers(room);
   });
