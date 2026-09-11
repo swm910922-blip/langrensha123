@@ -104,7 +104,6 @@ input{font-family:inherit}
 .pcard .needlebadge{position:absolute;top:6px;right:6px;background:var(--doctor);color:#082f49;
   border-radius:99px;padding:1px 7px;font-size:10px;font-weight:800;}
 .pcard .voters{font-size:9.5px;color:var(--gold);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;letter-spacing:.3px;line-height:1.3;padding:0 2px;}
-/* ✅ 新增：顯示「我投給誰」在投票者頭上 */
 .pcard .myvote{font-size:10px;color:var(--accent);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%;letter-spacing:.3px;line-height:1.3;padding:0 2px;font-weight:700;}
 .pcard .matetag{position:absolute;bottom:4px;left:50%;transform:translateX(-50%);font-size:9px;padding:1px 6px;border-radius:99px;font-weight:700;letter-spacing:.5px;white-space:nowrap;}
 .pcard .matetag.seer{background:rgba(34,211,238,.2);color:var(--doctor);border:1px solid rgba(34,211,238,.5)}
@@ -216,7 +215,7 @@ const socket = io(SERVER_URL, { transports: ['websocket', 'polling'] });
 const ROLE_INFO = {
   WEREWOLF: { name:'狼人',   camp:'wolf',   desc:'每晚與同伴共同商議刺殺一名玩家。', icon:'🐺' },
   SNIPER:   { name:'狙擊手', camp:'sniper', desc:'邪惡方。每晚可狙擊1人（不能狙自己），子彈威力醫生無法救治。你可能誤殺狼人！', icon:'🎯' },
-  SEER:     { name:'警察',   camp:'good',   desc:'每晚可查驗一名玩家的陣營（好人 / 壞人）。', icon:'🔮' },
+  SEER:     { name:'警察',   camp:'good',   desc:'每晚可查驗一名玩家的陣營（好人 / 壞人 / 具體身分）。', icon:'🔮' },
   DOCTOR:   { name:'醫生',   camp:'doctor', desc:'每晚可對1人施針（包含自己）。若目標被狼人殺 → 救活；累計2次空針 → 目標死亡。', icon:'💉' },
   VILLAGER: { name:'平民',   camp:'good',   desc:'沒有夜間技能，白天靠推理與投票找出邪惡方。', icon:'👤' },
 };
@@ -232,6 +231,7 @@ let state = {
   wolfMates: [],
   voteDetail: {},
   dayDiscussTime: 120,
+  voteSending: false,
 };
 
 const app = document.getElementById('app');
@@ -507,7 +507,7 @@ function phaseTitle(p){
 function phaseSub(p){
   const m = {
     NIGHT_WOLF:'狼人之間可討論，選定今晚的目標',
-    NIGHT_SEER:'選擇一名玩家查驗陣營',
+    NIGHT_SEER:'選擇一名玩家查驗陣營（會顯示具體是狼人或狙擊手）',
     NIGHT_DOCTOR:'選擇一名玩家施針（可選自己）',
     NIGHT_SNIPER:'選擇一名玩家狙擊（不能選自己）',
     DAY_ANNOUNCE:'昨晚有人倒牌…',
@@ -516,6 +516,31 @@ function phaseSub(p){
     GAME_OVER:'本局已結束',
   };
   return m[p] || '';
+}
+
+// ✅ 查驗結果代碼 → 中文標籤
+function campLabel(camp){
+  if (camp === 'WEREWOLF') return '🐺 狼人';
+  if (camp === 'SNIPER')   return '🎯 狙擊手';
+  if (camp === 'GOOD')     return '✅ 好人';
+  if (camp === 'WOLF')     return '🐺 壞人';
+  return camp;
+}
+// ✅ 查驗結果 → 顏色
+function campColor(camp){
+  if (camp === 'WEREWOLF') return 'var(--wolf)';
+  if (camp === 'SNIPER')   return 'var(--sniper)';
+  if (camp === 'GOOD')     return 'var(--good)';
+  if (camp === 'WOLF')     return 'var(--wolf)';
+  return 'var(--muted)';
+}
+// ✅ 查驗結果 → 圖示
+function campIcon(camp){
+  if (camp === 'WEREWOLF') return '🐺';
+  if (camp === 'SNIPER')   return '🎯';
+  if (camp === 'GOOD')     return '✅';
+  if (camp === 'WOLF')     return '🐺';
+  return '❓';
 }
 
 function playerCard(p){
@@ -538,13 +563,11 @@ function playerCard(p){
   const detail = state.voteDetail || state.phaseData?.voteDetail || {};
   const isVotePhase = state.phase === 'DAY_VOTE';
 
-  // ✅ 新增：這張卡的主人投給了誰（顯示在他自己頭上）
   const myVoteTarget = detail[p.id];
   const myVoteHtml = (isVotePhase && Object.prototype.hasOwnProperty.call(detail, p.id))
     ? `<div class="myvote">→ ${myVoteTarget ? '投給 ' + nameOf(myVoteTarget) : '棄票'}</div>`
     : '';
 
-  // 誰投給了這張卡的主人
   const voterNames = Object.keys(detail)
     .filter(voterId => detail[voterId] === p.id)
     .map(voterId => nameOf(voterId));
@@ -552,12 +575,20 @@ function playerCard(p){
     ? `<div class="voters">👤 ${voterNames.join('、')}</div>`
     : '';
 
+  // ✅ 查驗標記（區分狼人 / 狙擊手）
+  let checkBadge = '';
+  if (checkMark) {
+    const icon = campIcon(checkMark);
+    const bg = campColor(checkMark);
+    checkBadge = `<span class="votebadge" style="right:auto;left:6px;background:${bg};color:#fff">${icon}</span>`;
+  }
+
   return `
     <div class="pcard ${p.alive?'':'dead'} ${isMe?'me':''} ${isSelectable?'selectable':''} ${isSelected?'selected':''} ${isSeerMate?'is-seermate':''} ${isWolfMate?'is-wolfmate':''}"
          data-pid="${p.id}">
       ${voteCount ? `<span class="votebadge">${voteCount}</span>` : ''}
       ${emptyCount ? `<span class="needlebadge">💉${emptyCount}</span>` : ''}
-      ${checkMark ? `<span class="votebadge" style="right:auto;left:6px;background:${checkMark==='WOLF'?'var(--wolf)':'var(--good)'}">${checkMark==='WOLF'?'🐺':'✅'}</span>` : ''}
+      ${checkBadge}
       <div class="avatar">${p.isAI?'🤖':p.name.slice(0,1).toUpperCase()}</div>
       <div class="pname">${p.name}</div>
       <div class="pmeta">${!p.alive ? '已出局' : p.isHost ? '房主' : p.isAI ? '🤖 AI' : ''}</div>
@@ -604,7 +635,10 @@ function ActionPanelHTML(){
     case 'NIGHT_SEER': {
       if(state.myRole !== 'SEER') return `<div class="desc">🌙 天黑請閉眼…</div>`;
       const checks = d.checks || {};
-      const checkedList = Object.entries(checks).map(([id,c]) => `${nameOf(id)}：${c==='WOLF'?'🐺 壞人':'✅ 好人'}`).join('<br/>');
+      // ✅ 區分狼人 / 狙擊手 / 好人
+      const checkedList = Object.entries(checks).map(([id,c]) =>
+        `${nameOf(id)}：<span style="color:${campColor(c)};font-weight:700">${campLabel(c)}</span>`
+      ).join('<br/>');
       const myVote = d.mySeerVote;
       const mateVotes = d.seerTeammateVotes || {};
       const matesCount = d.seerMatesCount || 0;
@@ -639,9 +673,9 @@ function ActionPanelHTML(){
       return `
         <div class="title">🔮 警察查驗</div>
         ${matesHint}
-        <div class="desc">${matesCount > 0 ? `點擊玩家頭像投票，所有警察共同決定查驗對象（${totalSeers} 位警察）。` : '點擊玩家頭像查驗陣營。'}</div>
+        <div class="desc">${matesCount > 0 ? `點擊玩家頭像投票，所有警察共同決定查驗對象（${totalSeers} 位警察）。` : '點擊玩家頭像查驗陣營（會顯示具體是狼人還是狙擊手）。'}</div>
         ${matePanel}
-        ${checkedList ? `<div class="desc" style="border-top:1px solid var(--line);padding-top:8px">${checkedList}</div>` : ''}
+        ${checkedList ? `<div class="desc" style="border-top:1px solid var(--line);padding-top:8px;line-height:1.9">${checkedList}</div>` : ''}
         <div class="btns">
           <button class="btn good" data-action="seer_confirm" ${state.selectedTarget?'':'disabled'}>
             ${state.selectedTarget ? '查驗 ' + nameOf(state.selectedTarget) : '請先選擇目標'}
@@ -681,11 +715,8 @@ function ActionPanelHTML(){
           <button class="btn ghost" data-action="sniper_skip">不開槍</button>
         </div>`;
     }
-    // ✅ 改動：允許時間內改票
     case 'DAY_VOTE': {
-      const hasVoted = state.myVote !== undefined && state.myVote !== null
-        ? true
-        : Object.prototype.hasOwnProperty.call(state.voteDetail || {}, state.myId);
+      const hasVoted = Object.prototype.hasOwnProperty.call(state.voteDetail || {}, state.myId);
       const votedName = (state.myVote !== undefined && state.myVote !== null) ? nameOf(state.myVote) : '';
       return `
         <div class="title">🗳 投票放逐</div>
@@ -734,9 +765,20 @@ function bindActionButtons(root){
         case 'doctor_skip':    socket.emit('doctor_skip'); break;
         case 'sniper_shoot':   socket.emit('sniper_shoot', { targetId: t }); break;
         case 'sniper_skip':    socket.emit('sniper_skip'); break;
-        // ✅ 改動：投票可改，隨時更新
-        case 'vote_confirm':   state.myVote = t; socket.emit('day_vote', { targetId: t }); break;
-        case 'vote_skip':      state.myVote = null; socket.emit('day_vote', { targetId: null }); break;
+        case 'vote_confirm':
+          if (state.voteSending) break;
+          state.voteSending = true;
+          state.myVote = t;
+          socket.emit('day_vote', { targetId: t });
+          setTimeout(() => { state.voteSending = false; }, 300);
+          break;
+        case 'vote_skip':
+          if (state.voteSending) break;
+          state.voteSending = true;
+          state.myVote = null;
+          socket.emit('day_vote', { targetId: null });
+          setTimeout(() => { state.voteSending = false; }, 300);
+          break;
       }
       state.selectedTarget = null;
     };
@@ -878,12 +920,10 @@ socket.on('seer_teammate_votes', ({ votes }) => {
   render();
 });
 
-// ✅ 改動：同步自己的投票狀態，時間內可改
 socket.on('vote_updated', ({ votes, voteDetail }) => {
   state.phaseData.votes = votes;
   if (voteDetail) {
     state.voteDetail = voteDetail;
-    // 用 hasOwnProperty 判斷自己有沒有投過（undefined = 未投，null = 棄票，ID = 投某人）
     if (Object.prototype.hasOwnProperty.call(voteDetail, state.myId)) {
       state.myVote = voteDetail[state.myId];
     }
@@ -904,8 +944,15 @@ socket.on('chat_message', msg => {
   }
 });
 
-socket.on('seer_result', ({ targetName, camp }) => {
-  alert(`查驗結果：${targetName} 是 ${camp === 'WOLF' ? '🐺 壞人' : '✅ 好人'}`);
+// ✅ 查驗結果：區分狼人 / 狙擊手 / 好人
+socket.on('seer_result', ({ targetName, camp, role }) => {
+  let label;
+  if (camp === 'WEREWOLF' || role === 'WEREWOLF') label = '🐺 狼人';
+  else if (camp === 'SNIPER' || role === 'SNIPER') label = '🎯 狙擊手';
+  else if (camp === 'GOOD') label = '✅ 好人';
+  else if (camp === 'WOLF') label = '🐺 壞人';
+  else label = camp;
+  alert(`查驗結果：${targetName} 是 ${label}`);
 });
 
 socket.on('game_over', ({ winner, players, reason }) => {
