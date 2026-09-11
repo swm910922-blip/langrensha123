@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v5.1（GPT + 請求排隊）
+// 狼人殺後端 v5.2（GPT + 警察跳警 + 請求排隊）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -25,12 +25,16 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = 'gpt-4o-mini';
 const USE_GPT = !!OPENAI_API_KEY;
 
-console.log(USE_GPT ? '🤖 GPT 模式已啟用' : '📊 貝氏推斷模式（未設定 OPENAI_API_KEY）');
+if (USE_GPT) {
+  console.log(`🤖 GPT 模式已啟用，使用模型：${OPENAI_MODEL}`);
+} else {
+  console.log('📊 貝氏推斷模式（未設定 OPENAI_API_KEY）');
+}
 
 // ============================================================
-// 🚦 請求隊列（每分鐘最多 8 次，避開 RPM 限制）
+// 🚦 請求隊列
 // ============================================================
-const REQUEST_INTERVAL = 8000; // 每 8 秒一次 → 每分鐘 7.5 次
+const REQUEST_INTERVAL = 8000;
 let lastRequestAt = 0;
 const requestQueue = [];
 let queueRunning = false;
@@ -62,12 +66,10 @@ function enqueue(fn) {
 }
 
 // ============================================================
-// 🤖 OpenAI 呼叫（含隊列 + 重試）
+// 🤖 OpenAI 呼叫
 // ============================================================
 async function askGPT(messages, maxTokens = 120) {
   if (!USE_GPT) return null;
-
-  // 包進隊列，避免打爆 RPM
   return enqueue(async () => {
     const tryOnce = async (attempt) => {
       try {
@@ -88,9 +90,7 @@ async function askGPT(messages, maxTokens = 120) {
           signal: controller.signal,
         });
         clearTimeout(timeout);
-
         if (res.status === 429) {
-          // 限速 → 等 8 秒重試一次
           if (attempt < 1) {
             console.warn('[GPT] 429 限速，等待重試…');
             await new Promise(r => setTimeout(r, 8000));
@@ -115,7 +115,45 @@ async function askGPT(messages, maxTokens = 120) {
 }
 
 // ============================================================
-// 🧠 貝氏信念（兜底）
+// 工具
+// ============================================================
+function genRoomId(len) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let id = '';
+  do { id = ''; for (let i=0;i<len;i++) id += chars[Math.floor(Math.random()*chars.length)]; }
+  while (rooms.has(id));
+  return id;
+}
+function nameOf(room, id) { return room.players.find(x=>x.id===id)?.name || '未知'; }
+function roleName(role) {
+  return { WEREWOLF:'🐺 狼人', SNIPER:'🎯 狙擊手', SEER:'🔮 警察', DOCTOR:'💉 醫生', VILLAGER:'👤 平民' }[role] || role;
+}
+function publicPlayers(room) {
+  return room.players.map(p => ({ id:p.id, name:p.name, alive:p.alive, isHost:p.isHost, isAI:!!p.isAI }));
+}
+function roomPayload(room) { return { roomId:room.roomId, players:publicPlayers(room), phase:room.phase }; }
+function broadcastPlayers(room) { io.to(room.roomId).emit('players_updated', { players: publicPlayers(room) }); }
+function emitRoomState(room) { io.to(room.roomId).emit('room_updated', roomPayload(room)); }
+function tallyVotes(room) { const t={}; Object.values(room.votes).forEach(v => { if(v) t[v]=(t[v]||0)+1; }); return t; }
+function topVoted(tally) { let max=0,top=null; Object.keys(tally).forEach(id => { if(tally[id]>max){max=tally[id];top=id;} }); return top; }
+function systemMsg(room, text) { io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', system:true, text }); }
+function randomPick(arr) { return arr[Math.floor(Math.random()*arr.length)]; }
+
+function killPlayer(room, p, cause) {
+  if (!p || !p.alive) return false;
+  p.alive = false;
+  p.deathCause = cause;
+  p.canSpeakInPublic = true;
+  return true;
+}
+function announceDeath(room, player, cause) {
+  const causeText = { WOLF:'被狼人殺害', SNIPER:'被狙擊手擊殺', VOTE:'被投票放逐', DOCTOR:'被醫生的空針毒死', DISCONNECT:'離線' }[cause] || '出局';
+  systemMsg(room, `💀 ${player.name} ${causeText}，他的身分是【${roleName(player.role)}】，可以發表一句遺言。`);
+  onPlayerRevealed(room, player);
+}
+
+// ============================================================
+// 🧠 貝氏信念
 // ============================================================
 function initBeliefs(room) {
   const alive = room.players.filter(p => p.alive);
@@ -174,44 +212,6 @@ function pickTargetByBelief(room, ai, filterFn) {
 }
 
 // ============================================================
-// 工具
-// ============================================================
-function genRoomId(len) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let id = '';
-  do { id = ''; for (let i=0;i<len;i++) id += chars[Math.floor(Math.random()*chars.length)]; }
-  while (rooms.has(id));
-  return id;
-}
-function nameOf(room, id) { return room.players.find(x=>x.id===id)?.name || '未知'; }
-function roleName(role) {
-  return { WEREWOLF:'🐺 狼人', SNIPER:'🎯 狙擊手', SEER:'🔮 警察', DOCTOR:'💉 醫生', VILLAGER:'👤 平民' }[role] || role;
-}
-function publicPlayers(room) {
-  return room.players.map(p => ({ id:p.id, name:p.name, alive:p.alive, isHost:p.isHost, isAI:!!p.isAI }));
-}
-function roomPayload(room) { return { roomId:room.roomId, players:publicPlayers(room), phase:room.phase }; }
-function broadcastPlayers(room) { io.to(room.roomId).emit('players_updated', { players: publicPlayers(room) }); }
-function emitRoomState(room) { io.to(room.roomId).emit('room_updated', roomPayload(room)); }
-function tallyVotes(room) { const t={}; Object.values(room.votes).forEach(v => { if(v) t[v]=(t[v]||0)+1; }); return t; }
-function topVoted(tally) { let max=0,top=null; Object.keys(tally).forEach(id => { if(tally[id]>max){max=tally[id];top=id;} }); return top; }
-function systemMsg(room, text) { io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', system:true, text }); }
-function randomPick(arr) { return arr[Math.floor(Math.random()*arr.length)]; }
-
-function killPlayer(room, p, cause) {
-  if (!p || !p.alive) return false;
-  p.alive = false;
-  p.deathCause = cause;
-  p.canSpeakInPublic = true;
-  return true;
-}
-function announceDeath(room, player, cause) {
-  const causeText = { WOLF:'被狼人殺害', SNIPER:'被狙擊手擊殺', VOTE:'被投票放逐', DOCTOR:'被醫生的空針毒死', DISCONNECT:'離線' }[cause] || '出局';
-  systemMsg(room, `💀 ${player.name} ${causeText}，他的身分是【${roleName(player.role)}】，可以發表一句遺言。`);
-  onPlayerRevealed(room, player);
-}
-
-// ============================================================
 // 角色分配
 // ============================================================
 function assignRoles(n) {
@@ -259,7 +259,7 @@ const SPEECH = {
   FOLLOW: ['我同意，{name} 確實可疑。','好，我跟票投 {name}。','聽起來有道理，我也懷疑 {name}。'],
   DEFEND: ['我是好人，不要投我！','我真的是平民，相信我。','你們投我是浪費票。'],
   CHAOS:  ['我什麼都不知道。','我覺得我們應該全部投自己。','我已經放棄推理了。'],
-  SEER_CLAIM: ['我是預言家，我查過人了。','我是警察，請相信我。'],
+  SEER_CLAIM: ['我是警察！請相信我。'],
   SILENT: ['{name} 也太安靜了吧。','{name} 都不說話，可疑。'],
 };
 function fillTemplate(tmpl, name) { return tmpl.replace(/\{name\}/g, name || ''); }
@@ -486,8 +486,9 @@ function decideTargetByBelief(room, ai, context) {
   }
 }
 
-async function aiSpeak(room, ai) {
-  if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
+// ============================================================
+// 🗣 AI 發言（含警察跳警）
+// ============================================================
 async function aiSpeak(room, ai) {
   if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
 
@@ -505,7 +506,6 @@ async function aiSpeak(room, ai) {
       io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: speech });
       ai.hasClaimedSeer = true;
 
-      // 🧠 讓所有 AI 大幅提升對該目標的懷疑度
       Object.keys(room.aiBeliefs || {}).forEach(otherAiId => {
         if (otherAiId === ai.id) return;
         updateBelief(room, otherAiId, knownWolfId, +0.55, `${ai.name} 跳警指認`);
@@ -514,7 +514,6 @@ async function aiSpeak(room, ai) {
     }
   }
 
-  if (USE_GPT) {
   if (USE_GPT) {
     const text = await aiSpeakWithGPT(room, ai);
     if (text && room.phase === 'DAY_DISCUSS' && ai.alive) {
@@ -682,7 +681,6 @@ function scheduleAiActions(room, phase) {
   const ais = room.players.filter(p => p.isAI && p.alive);
 
   if (phase === 'DAY_DISCUSS') {
-    // 🔑 改為：每個 AI 間隔 10 秒，配合 RPM 限制
     ais.forEach((ai, idx) => {
       setTimeout(async () => {
         if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
@@ -1176,7 +1174,7 @@ io.on('connection', socket => {
       doctorShotsLeft:0, sniperShotsLeft:0, emptyShotCount:{},
       aiIntel:{}, aiBeliefs:{}, recentPublicChat:[], speakCount:{}, timer:null, endsAt:null,
     };
-    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:true, role:null, isAI:false, canSpeakInPublic:false });
+    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:true, role:null, isAI:false, canSpeakInPublic:false, hasClaimedSeer:false });
     rooms.set(roomId, room);
     socket.join(roomId);
     socket.data.roomId = roomId;
@@ -1194,7 +1192,7 @@ io.on('connection', socket => {
     if (room.players.length >= 18) return cb && cb({ ok:false, error:'房間已滿' });
     if (room.players.some(p => p.name === nickname)) return cb && cb({ ok:false, error:'暱稱已被使用' });
 
-    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:false, role:null, isAI:false, canSpeakInPublic:false });
+    room.players.push({ id:socket.id, name:nickname, alive:true, isHost:false, role:null, isAI:false, canSpeakInPublic:false, hasClaimedSeer:false });
     socket.join(roomId);
     socket.data.roomId = roomId;
     if (cb) cb({ ok:true });
@@ -1218,7 +1216,7 @@ io.on('connection', socket => {
 
     room.players.push({
       id: genAiId(room), name, alive:true, isHost:false, role:null, isAI:true,
-      canSpeakInPublic:false, personality
+      canSpeakInPublic:false, hasClaimedSeer:false, personality
     });
     if (cb) cb({ ok:true });
     emitRoomState(room);
@@ -1265,7 +1263,7 @@ io.on('connection', socket => {
     room.seerChecks = {}; room.seerVotes = {}; room.seerResolved = false; room.pendingDeaths = [];
     room.doctorTarget = null; room.sniperTarget = null; room.emptyShotCount = {};
     room.aiIntel = {}; room.aiBeliefs = {}; room.recentPublicChat = []; room.speakCount = {};
-    room.players.forEach(p => { p.alive = true; p.role = null; p.deathCause = null; p.canSpeakInPublic = false; });
+    room.players.forEach(p => { p.alive = true; p.role = null; p.deathCause = null; p.canSpeakInPublic = false; p.hasClaimedSeer = false; });
     emitRoomState(room);
     broadcastPlayers(room);
   });
