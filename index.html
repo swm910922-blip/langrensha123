@@ -229,6 +229,7 @@ let state = {
   seerMates: [],
   wolfMates: [],
   voteDetail: {},
+  dayDiscussTime: 120,
 };
 
 const app = document.getElementById('app');
@@ -335,6 +336,20 @@ function RoomView(){
           <button class="btn ghost" id="btn-add-ai" ${n>=18?'disabled':''}>＋ 新增 AI 玩家</button>
           ${aiCount > 0 ? `<button class="btn ghost" id="btn-remove-ai" style="flex:0 0 auto;width:auto;padding:13px 18px">移除 AI</button>` : ''}
         </div>
+
+        <div style="background:var(--panel-2);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <label style="font-size:13px;color:var(--text);font-weight:600">白天發言時間</label>
+            <span id="day-time-display" style="color:var(--gold);font-weight:800;font-size:16px">${state.dayDiscussTime || 120} 秒</span>
+          </div>
+          <input type="range" id="day-time-slider" min="30" max="300" step="10" value="${state.dayDiscussTime || 120}"
+                 style="width:100%;accent-color:var(--accent);cursor:pointer" />
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:6px">
+            <span>30 秒</span>
+            <span>5 分鐘</span>
+          </div>
+        </div>
+
         <button class="btn gold" id="btn-start" ${n<6?'disabled':''}>
           開始遊戲 ${n<6?`（還需 ${6-n} 人）`:''}
         </button>
@@ -360,6 +375,22 @@ function RoomView(){
       if(!res?.ok) alert(res?.error || '移除 AI 失敗');
     });
   });
+
+  // 白天發言時間滑動條
+  const slider = el.querySelector('#day-time-slider');
+  if (slider) {
+    const display = el.querySelector('#day-time-display');
+    slider.oninput = () => {
+      const val = parseInt(slider.value);
+      display.textContent = val + ' 秒';
+      state.dayDiscussTime = val;
+    };
+    slider.onchange = () => {
+      const val = parseInt(slider.value);
+      socket.emit('set_day_time', { seconds: val });
+    };
+  }
+
   el.querySelector('#btn-start')?.addEventListener('click', () => {
     socket.emit('start_game', {}, res => { if(!res?.ok) alert(res?.error || '無法開始'); });
   });
@@ -494,7 +525,6 @@ function playerCard(p){
   const checkMark = state.phaseData?.checks?.[p.id];
   const emptyCount = state.phaseData?.emptyCounts?.[p.id] || 0;
 
-  // 🔮 同夥判定
   const seerMatesArr = Array.isArray(state.seerMates) ? state.seerMates : [];
   const wolfMatesArr = Array.isArray(state.wolfMates) ? state.wolfMates : [];
   const isSeerMate = state.myRole === 'SEER' && seerMatesArr.some(m => m.id === p.id);
@@ -504,7 +534,6 @@ function playerCard(p){
   if (isSeerMate) mateTag = `<span class="matetag seer">🔮 警察夥伴</span>`;
   else if (isWolfMate) mateTag = `<span class="matetag wolf">🐺 同夥</span>`;
 
-  // 🔑 投票明細：誰投給了這個人
   const detail = state.voteDetail || state.phaseData?.voteDetail || {};
   const voterNames = Object.keys(detail)
     .filter(voterId => detail[voterId] === p.id)
@@ -749,19 +778,27 @@ socket.on('connect', () => { state.myId = socket.id; });
 
 socket.on('room_created', payload => {
   state.roomId = payload.roomId; state.players = payload.players; state.phase = payload.phase;
+  if (payload.dayDiscussTime) state.dayDiscussTime = payload.dayDiscussTime;
   state.isHost = true; state.screen = 'room'; render();
 });
 
 socket.on('room_joined', payload => {
   state.roomId = payload.roomId; state.players = payload.players; state.phase = payload.phase;
+  if (payload.dayDiscussTime) state.dayDiscussTime = payload.dayDiscussTime;
   state.isHost = payload.players.find(p => p.id === state.myId)?.isHost || false;
   state.screen = 'room'; render();
 });
 
 socket.on('room_updated', payload => {
   state.players = payload.players; state.phase = payload.phase;
+  if (payload.dayDiscussTime) state.dayDiscussTime = payload.dayDiscussTime;
   state.isHost = payload.players.find(p => p.id === state.myId)?.isHost || false;
   render();
+});
+
+socket.on('day_time_updated', ({ seconds }) => {
+  state.dayDiscussTime = seconds;
+  if (state.screen === 'room') render();
 });
 
 socket.on('players_updated', ({ players }) => { state.players = players; render(); });
@@ -830,7 +867,6 @@ socket.on('chat_message', msg => {
   const ch = msg.channel || 'PUBLIC';
   if(!state.chats[ch]) state.chats[ch] = [];
   state.chats[ch].push(msg);
-  // 🔑 只 append 訊息，不重繪整個畫面（避免輸入框被清空）
   if(state.chatTab === ch) {
     const box = document.querySelector('.chat-msgs');
     if (box) {
