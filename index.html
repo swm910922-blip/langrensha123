@@ -89,7 +89,9 @@ input{font-family:inherit}
 .pcard .avatar{width:46px;height:46px;border-radius:50%;margin:0 auto 8px;
   display:flex;align-items:center;justify-content:center;font-size:19px;font-weight:700;
   background:linear-gradient(135deg,#3b4a6b,#2a3345);color:#cfd8e8;}
-.pcard .pname{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pcard .pname{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;}
+/* ✅ 名字旁邊顯示查驗結果 */
+.pcard .role-tag{display:inline-block;margin-left:4px;padding:1px 6px;font-size:9px;border-radius:6px;font-weight:800;vertical-align:middle;white-space:nowrap;letter-spacing:0;}
 .pcard .pmeta{font-size:10px;color:var(--muted);margin-top:4px;letter-spacing:.5px;min-height:13px}
 .pcard.dead{opacity:.32;filter:grayscale(1)}
 .pcard.dead::after{content:'☠';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
@@ -182,6 +184,7 @@ input{font-family:inherit}
   .pcard{padding:10px 5px 20px;border-radius:12px}
   .pcard .avatar{width:36px;height:36px;font-size:15px;margin-bottom:5px}
   .pcard .pname{font-size:11.5px}
+  .pcard .role-tag{font-size:8.5px;padding:1px 5px;margin-left:3px}
   .pcard .pmeta{font-size:9.5px}
   .pcard.dead::after{font-size:32px}
   .pcard.me .pname::after{font-size:9px}
@@ -202,6 +205,7 @@ input{font-family:inherit}
   .pcard{padding:8px 4px 18px}
   .pcard .avatar{width:32px;height:32px;font-size:14px}
   .pcard .pname{font-size:11px}
+  .pcard .role-tag{font-size:8px;padding:0 4px}
 }
 </style>
 </head>
@@ -215,7 +219,7 @@ const socket = io(SERVER_URL, { transports: ['websocket', 'polling'] });
 const ROLE_INFO = {
   WEREWOLF: { name:'狼人',   camp:'wolf',   desc:'每晚與同伴共同商議刺殺一名玩家。', icon:'🐺' },
   SNIPER:   { name:'狙擊手', camp:'sniper', desc:'邪惡方。每晚可狙擊1人（不能狙自己），子彈威力醫生無法救治。你可能誤殺狼人！', icon:'🎯' },
-  SEER:     { name:'警察',   camp:'good',   desc:'每晚可查驗一名玩家的陣營（好人 / 壞人 / 具體身分）。', icon:'🔮' },
+  SEER:     { name:'警察',   camp:'good',   desc:'每晚可查驗一名玩家的完整職業（狼人/狙擊手/警察/醫生/平民）。', icon:'🔮' },
   DOCTOR:   { name:'醫生',   camp:'doctor', desc:'每晚可對1人施針（包含自己）。若目標被狼人殺 → 救活；累計2次空針 → 目標死亡。', icon:'💉' },
   VILLAGER: { name:'平民',   camp:'good',   desc:'沒有夜間技能，白天靠推理與投票找出邪惡方。', icon:'👤' },
 };
@@ -507,7 +511,7 @@ function phaseTitle(p){
 function phaseSub(p){
   const m = {
     NIGHT_WOLF:'狼人之間可討論，選定今晚的目標',
-    NIGHT_SEER:'選擇一名玩家查驗陣營（會顯示具體是狼人或狙擊手）',
+    NIGHT_SEER:'選擇一名玩家查驗完整職業（狼人/狙擊手/警察/醫生/平民）',
     NIGHT_DOCTOR:'選擇一名玩家施針（可選自己）',
     NIGHT_SNIPER:'選擇一名玩家狙擊（不能選自己）',
     DAY_ANNOUNCE:'昨晚有人倒牌…',
@@ -518,28 +522,35 @@ function phaseSub(p){
   return m[p] || '';
 }
 
-// ✅ 查驗結果代碼 → 中文標籤
-function campLabel(camp){
-  if (camp === 'WEREWOLF') return '🐺 狼人';
-  if (camp === 'SNIPER')   return '🎯 狙擊手';
-  if (camp === 'GOOD')     return '✅ 好人';
-  if (camp === 'WOLF')     return '🐺 壞人';
-  return camp;
+// ✅ 完整職業標籤
+function roleLabel(role){
+  if (role === 'WEREWOLF') return '🐺 狼人';
+  if (role === 'SNIPER')   return '🎯 狙擊手';
+  if (role === 'SEER')     return '🔮 警察';
+  if (role === 'DOCTOR')   return '💉 醫生';
+  if (role === 'VILLAGER') return '👤 平民';
+  if (role === 'GOOD')     return '✅ 好人';
+  if (role === 'WOLF')     return '🐺 壞人';
+  return role;
 }
-// ✅ 查驗結果 → 顏色
-function campColor(camp){
-  if (camp === 'WEREWOLF') return 'var(--wolf)';
-  if (camp === 'SNIPER')   return 'var(--sniper)';
-  if (camp === 'GOOD')     return 'var(--good)';
-  if (camp === 'WOLF')     return 'var(--wolf)';
+function roleColor(role){
+  if (role === 'WEREWOLF') return 'var(--wolf)';
+  if (role === 'SNIPER')   return 'var(--sniper)';
+  if (role === 'SEER')     return 'var(--doctor)';
+  if (role === 'DOCTOR')   return 'var(--doctor)';
+  if (role === 'VILLAGER') return 'var(--good)';
+  if (role === 'GOOD')     return 'var(--good)';
+  if (role === 'WOLF')     return 'var(--wolf)';
   return 'var(--muted)';
 }
-// ✅ 查驗結果 → 圖示
-function campIcon(camp){
-  if (camp === 'WEREWOLF') return '🐺';
-  if (camp === 'SNIPER')   return '🎯';
-  if (camp === 'GOOD')     return '✅';
-  if (camp === 'WOLF')     return '🐺';
+function roleIcon(role){
+  if (role === 'WEREWOLF') return '🐺';
+  if (role === 'SNIPER')   return '🎯';
+  if (role === 'SEER')     return '🔮';
+  if (role === 'DOCTOR')   return '💉';
+  if (role === 'VILLAGER') return '👤';
+  if (role === 'GOOD')     return '✅';
+  if (role === 'WOLF')     return '🐺';
   return '❓';
 }
 
@@ -548,7 +559,7 @@ function playerCard(p){
   const isSelected = state.selectedTarget === p.id;
   const isMe = p.id === state.myId;
   const voteCount = state.phaseData?.votes?.[p.id] || 0;
-  const checkMark = state.phaseData?.checks?.[p.id];
+  const checkRole = state.phaseData?.checks?.[p.id];  // ✅ 完整職業
   const emptyCount = state.phaseData?.emptyCounts?.[p.id] || 0;
 
   const seerMatesArr = Array.isArray(state.seerMates) ? state.seerMates : [];
@@ -575,12 +586,13 @@ function playerCard(p){
     ? `<div class="voters">👤 ${voterNames.join('、')}</div>`
     : '';
 
-  // ✅ 查驗標記（區分狼人 / 狙擊手）
-  let checkBadge = '';
-  if (checkMark) {
-    const icon = campIcon(checkMark);
-    const bg = campColor(checkMark);
-    checkBadge = `<span class="votebadge" style="right:auto;left:6px;background:${bg};color:#fff">${icon}</span>`;
+  // ✅ 查驗結果標籤（顯示在名字旁邊）
+  let roleTag = '';
+  if (checkRole) {
+    const icon = roleIcon(checkRole);
+    const color = roleColor(checkRole);
+    const label = roleLabel(checkRole).replace(/^[^\s]+\s/, '');  // 去掉 emoji，只留文字
+    roleTag = `<span class="role-tag" style="color:${color};background:${color}22;border:1px solid ${color}66">${icon}${label}</span>`;
   }
 
   return `
@@ -588,9 +600,8 @@ function playerCard(p){
          data-pid="${p.id}">
       ${voteCount ? `<span class="votebadge">${voteCount}</span>` : ''}
       ${emptyCount ? `<span class="needlebadge">💉${emptyCount}</span>` : ''}
-      ${checkBadge}
       <div class="avatar">${p.isAI?'🤖':p.name.slice(0,1).toUpperCase()}</div>
-      <div class="pname">${p.name}</div>
+      <div class="pname">${p.name}${roleTag}</div>
       <div class="pmeta">${!p.alive ? '已出局' : p.isHost ? '房主' : p.isAI ? '🤖 AI' : ''}</div>
       ${myVoteHtml}
       ${votersHtml}
@@ -635,9 +646,9 @@ function ActionPanelHTML(){
     case 'NIGHT_SEER': {
       if(state.myRole !== 'SEER') return `<div class="desc">🌙 天黑請閉眼…</div>`;
       const checks = d.checks || {};
-      // ✅ 區分狼人 / 狙擊手 / 好人
-      const checkedList = Object.entries(checks).map(([id,c]) =>
-        `${nameOf(id)}：<span style="color:${campColor(c)};font-weight:700">${campLabel(c)}</span>`
+      // ✅ 顯示完整職業
+      const checkedList = Object.entries(checks).map(([id, role]) =>
+        `${nameOf(id)}：<span style="color:${roleColor(role)};font-weight:700">${roleLabel(role)}</span>`
       ).join('<br/>');
       const myVote = d.mySeerVote;
       const mateVotes = d.seerTeammateVotes || {};
@@ -673,7 +684,7 @@ function ActionPanelHTML(){
       return `
         <div class="title">🔮 警察查驗</div>
         ${matesHint}
-        <div class="desc">${matesCount > 0 ? `點擊玩家頭像投票，所有警察共同決定查驗對象（${totalSeers} 位警察）。` : '點擊玩家頭像查驗陣營（會顯示具體是狼人還是狙擊手）。'}</div>
+        <div class="desc">${matesCount > 0 ? `點擊玩家頭像投票，所有警察共同決定查驗對象（${totalSeers} 位警察）。` : '點擊玩家頭像查驗完整職業。'}</div>
         ${matePanel}
         ${checkedList ? `<div class="desc" style="border-top:1px solid var(--line);padding-top:8px;line-height:1.9">${checkedList}</div>` : ''}
         <div class="btns">
@@ -944,13 +955,12 @@ socket.on('chat_message', msg => {
   }
 });
 
-// ✅ 查驗結果：區分狼人 / 狙擊手 / 好人
-socket.on('seer_result', ({ targetName, camp, role }) => {
+// ✅ 查驗結果：顯示完整職業
+socket.on('seer_result', ({ targetName, role, camp }) => {
   let label;
-  if (camp === 'WEREWOLF' || role === 'WEREWOLF') label = '🐺 狼人';
-  else if (camp === 'SNIPER' || role === 'SNIPER') label = '🎯 狙擊手';
-  else if (camp === 'GOOD') label = '✅ 好人';
+  if (role) label = roleLabel(role);
   else if (camp === 'WOLF') label = '🐺 壞人';
+  else if (camp === 'GOOD') label = '✅ 好人';
   else label = camp;
   alert(`查驗結果：${targetName} 是 ${label}`);
 });
