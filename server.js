@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v7.0（10 種 AI 個性 + GPT + 遊戲凍結）
+// 狼人殺後端 v7.2（智慧限速 + 10 種個性 + 遊戲凍結）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -18,24 +18,39 @@ const rooms = new Map();
 
 const PHASE_SECONDS = {
   NIGHT_WOLF: 30, NIGHT_SEER: 25, NIGHT_DOCTOR: 20, NIGHT_SNIPER: 20,
-  DAY_ANNOUNCE: 12, DAY_DISCUSS: 90, DAY_VOTE: 45,
+  DAY_ANNOUNCE: 12, DAY_DISCUSS: 120, DAY_VOTE: 60,
 };
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
 const OPENAI_MODEL = 'gpt-4o-mini';
 const USE_GPT = !!OPENAI_API_KEY;
 
+// 🔑 每分鐘最多請求次數（依你的帳號限制調整）
+const OPENAI_RPM = 3;
+
 if (USE_GPT) {
-  console.log(`🤖 GPT 模式已啟用，使用模型：${OPENAI_MODEL}`);
+  console.log(`🤖 GPT 模式已啟用，使用模型：${OPENAI_MODEL}，限制 ${OPENAI_RPM} RPM`);
 } else {
   console.log('📊 貝氏推斷模式（未設定 OPENAI_API_KEY）');
 }
 
 // ============================================================
-// 🚦 請求隊列
+// 🚦 智慧限速（滑動窗口 + 重試）
 // ============================================================
-const REQUEST_INTERVAL = 8000;
-let lastRequestAt = 0;
+const requestTimestamps = []; // 記錄最近 60 秒的請求時間
+
+function getWaitTime() {
+  const now = Date.now();
+  // 清除超過 60 秒的紀錄
+  while (requestTimestamps.length > 0 && now - requestTimestamps[0] > 60000) {
+    requestTimestamps.shift();
+  }
+  // 如果還沒滿 → 立刻執行
+  if (requestTimestamps.length < OPENAI_RPM) return 0;
+  // 否則要等到最舊的請求過 60 秒
+  return 60000 - (now - requestTimestamps[0]) + 100;
+}
+
 const requestQueue = [];
 let queueRunning = false;
 
@@ -44,10 +59,12 @@ async function processQueue() {
   queueRunning = true;
   while (requestQueue.length > 0) {
     const job = requestQueue.shift();
-    const now = Date.now();
-    const wait = Math.max(0, lastRequestAt + REQUEST_INTERVAL - now);
-    if (wait > 0) await new Promise(r => setTimeout(r, wait));
-    lastRequestAt = Date.now();
+    const wait = getWaitTime();
+    if (wait > 0) {
+      console.log(`[GPT] 等待 ${Math.round(wait/1000)} 秒（限速中）…`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+    requestTimestamps.push(Date.now());
     try {
       const result = await job.fn();
       job.resolve(result);
@@ -66,7 +83,7 @@ function enqueue(fn) {
 }
 
 // ============================================================
-// 🤖 OpenAI 呼叫
+// 🤖 OpenAI 呼叫（含 429 智慧重試）
 // ============================================================
 async function askGPT(messages, maxTokens = 120) {
   if (!USE_GPT) return null;
@@ -74,7 +91,7 @@ async function askGPT(messages, maxTokens = 120) {
     const tryOnce = async (attempt) => {
       try {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000);
+        const timeout = setTimeout(() => controller.abort(), 20000);
         const res = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -85,22 +102,32 @@ async function askGPT(messages, maxTokens = 120) {
             model: OPENAI_MODEL,
             messages,
             max_tokens: maxTokens,
-            temperature: 0.85,
+            temperature: 0.9,
           }),
           signal: controller.signal,
         });
         clearTimeout(timeout);
+
         if (res.status === 429) {
-          if (attempt < 1) {
-            console.warn('[GPT] 429 限速，等待重試…');
-            await new Promise(r => setTimeout(r, 8000));
+          // 讀取 Retry-After 標頭（如果有）
+          const retryAfter = res.headers.get('retry-after');
+          const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 20000;
+
+          if (attempt < 2) {
+            console.warn(`[GPT] 429 限速，等 ${Math.round(waitMs/1000)} 秒重試（第 ${attempt+1} 次）…`);
+            // 清空並等待窗口重置
+            requestTimestamps.length = 0;
+            await new Promise(r => setTimeout(r, waitMs));
+            requestTimestamps.push(Date.now());
             return tryOnce(attempt + 1);
           }
-          console.warn('[GPT] 429 放棄');
+          console.warn('[GPT] 429 放棄（改用模板）');
           return null;
         }
+
         if (!res.ok) {
-          console.warn('[GPT]', res.status, (await res.text()).slice(0, 150));
+          const errText = await res.text();
+          console.warn('[GPT]', res.status, errText.slice(0, 150));
           return null;
         }
         const data = await res.json();
@@ -231,35 +258,27 @@ function doctorShotsFor(n) { return n >= 15 ? 4 : 3; }
 function sniperShotsFor(n) { return n >= 15 ? 4 : 3; }
 
 // ============================================================
-// 🎭 AI 個性系統（10 種）
+// 🎭 AI 個性
 // ============================================================
 const AI_NAMES = ['小狼','阿智','阿呆','小紅','阿明','阿豪','小玉','大頭','阿芬','老張','小陳','阿傑','阿宏','小如','阿文','小婷','阿伯','小胖'];
 function genAiId(room) { let i=1; while(room.players.find(p=>p.id==='ai_'+i)) i++; return 'ai_'+i; }
 
 const AI_PERSONALITIES = [
-  'ANALYTICAL',  // 冷靜分析型
-  'IMPULSIVE',   // 衝動跟風型
-  'LAZY',        // 划水佛系型
-  'PARANOID',    // 傲嬌疑心病型
-  'INTUITIVE',   // 直覺神棍型
-  'CHAOTIC',     // 混亂邪惡型
-  'LOYAL',       // 盲從忠犬型
-  'HONEST',      // 老實人型
-  'TALKATIVE',   // 話癆廢話王型
-  'VENGEFUL',    // 死磕復仇型
+  'ANALYTICAL', 'IMPULSIVE', 'LAZY', 'PARANOID', 'INTUITIVE',
+  'CHAOTIC', 'LOYAL', 'HONEST', 'TALKATIVE', 'VENGEFUL',
 ];
 
 const PERSONALITY_TONE = {
-  ANALYTICAL: '你是【冷靜分析型】的玩家。發言條理分明、客觀，喜歡引用過往的投票軌跡與邏輯進行推斷，會分析每個人的發言是否有邏輯漏洞。',
-  IMPULSIVE:  '你是【衝動跟風型】的玩家。說話直率、容易緊張，常用驚嘆號，容易被別人帶風向，傾向跟隨場上發言最積極的人。',
-  LAZY:       '你是【划水佛系型】的玩家。話少、句子短（例如「我覺得都行」「先觀望」），盡量不引人注目，避免成為焦點。',
-  PARANOID:   '你是【傲嬌疑心病型】的玩家。容易懷疑別人，講話帶有防禦性（例如「你幹嘛一直盯著我？你看起來才像狼！」），誰指責你你就反嗆回去。',
-  INTUITIVE:  '你是【直覺神棍型】的玩家。不靠邏輯全憑第六感，會說「我昨晚夢到 XX 身上有狼味」「相信我，XX 眼神很虛」這類的話。',
-  CHAOTIC:    '你是【混亂邪惡/樂子人型】的玩家。唯恐天下不亂，喜歡拱火、故意搞亂局勢（例如「要不我們今天把發言最完美的人票掉看看？」）。',
-  LOYAL:      '你是【盲從忠犬型】的玩家。你心中認定場上某一位玩家是好人，會強烈維護對方（例如「我相信 XX！誰指責 XX 誰就是狼！」）。',
-  HONEST:     '你是【老實人/老幹部型】的玩家。講話非常禮貌、規矩、稍微有點冗長（例如「大家請冷靜，我們應該仔細分析昨晚的投票軌跡，不能冤枉好人」）。',
-  TALKATIVE:  '你是【話癆廢話王型】的玩家。字數很多但完全沒有重點，喜歡打太極、講廢話（例如「我覺得今天天氣很好，關於誰是狼這件事，我覺得可能是，但也可能不是，大家怎麼看？」）。',
-  VENGEFUL:   '你是【死磕復仇型】的玩家。只要有任何人懷疑過你一次，你整場遊戲就會死咬著對方不放（例如「XX 剛才踩了我一步，他絕對是想轉移焦點的狼！」）。',
+  ANALYTICAL: '你是【冷靜分析型】。發言條理分明、客觀，喜歡引用過往的投票軌跡與邏輯進行推斷。',
+  IMPULSIVE:  '你是【衝動跟風型】。說話直率、容易緊張，常用驚嘆號，容易被別人帶風向。',
+  LAZY:       '你是【划水佛系型】。話少、句子短（如「我覺得都行」「先觀望」），盡量不引人注目。',
+  PARANOID:   '你是【傲嬌疑心病型】。容易懷疑別人，講話帶有防禦性，誰指責你你就反嗆回去。',
+  INTUITIVE:  '你是【直覺神棍型】。不靠邏輯全憑第六感，會說「我昨晚夢到 XX 身上有狼味」這類的話。',
+  CHAOTIC:    '你是【混亂邪惡型】。唯恐天下不亂，喜歡拱火、故意搞亂局勢。',
+  LOYAL:      '你是【盲從忠犬型】。你心中認定場上某一位玩家是好人，會強烈維護對方。',
+  HONEST:     '你是【老實人型】。講話非常禮貌、規矩、稍微有點冗長。',
+  TALKATIVE:  '你是【話癆廢話王型】。字數很多但完全沒有重點，喜歡打太極、講廢話。',
+  VENGEFUL:   '你是【死磕復仇型】。只要有人懷疑過你一次，你就會死咬著對方不放。',
 };
 
 const PERSONALITY_WEIGHTS = {
@@ -276,16 +295,96 @@ const PERSONALITY_WEIGHTS = {
 };
 
 // ============================================================
-// 💬 發言模板（兜底）
+// 💬 發言模板
 // ============================================================
 const SPEECH = {
-  ACCUSE: ['我覺得 {name} 很怪。','{name} 的發言有點刻意。','我投 {name}。','{name} 一直不說話，很可疑。'],
-  FOLLOW: ['我同意，{name} 確實可疑。','好，我跟票投 {name}。','聽起來有道理，我也懷疑 {name}。'],
-  DEFEND: ['我是好人，不要投我！','我真的是平民，相信我。','你們投我是浪費票。'],
-  CHAOS:  ['我什麼都不知道。','我覺得我們應該全部投自己。','我已經放棄推理了。'],
-  SEER_CLAIM: ['我是警察！請相信我。'],
-  SILENT: ['{name} 也太安靜了吧。','{name} 都不說話，可疑。'],
+  ACCUSE: [
+    '我覺得 {name} 很怪，大家注意一下。',
+    '{name} 的發言有點刻意，我懷疑他。',
+    '我投 {name}，感覺他在藏。',
+    '{name} 你解釋一下？剛剛那句話很可疑。',
+    '我懷疑 {name}，他一直在轉移話題。',
+    '{name} 一直不說話，很可疑。',
+    '我認為 {name} 應該被放逐。',
+    '{name} 邏輯不通，一定是壞人。',
+    '我建議大家注意 {name}。',
+    '{name} 從頭到尾都怪怪的。',
+    '我觀察 {name} 很久了，有問題。',
+    '{name} 你這樣講話很不自然。',
+    '我覺得 {name} 一直在帶風向。',
+    '{name} 的行為太反常了，投他。',
+    '我不太相信 {name}。',
+  ],
+  FOLLOW: [
+    '我同意，{name} 確實可疑。',
+    '好，我跟票投 {name}。',
+    '聽起來有道理，我也懷疑 {name}。',
+    '說得對，{name} 有問題。',
+    '我跟。{name} 看起來真的有鬼。',
+    '跟票 {name}，這波穩。',
+    '大家說 {name} 那我就投 {name} 了。',
+    '{name} 是吧？我跟。',
+    '我信大家的判斷，投 {name}。',
+    '我也覺得 {name} 有問題。',
+    '既然你們都這麼說，我就跟 {name}。',
+    '{name} 這波我也跟。',
+    '我相信大家的判斷，{name}。',
+    '好，就 {name} 吧。',
+    '大家一起投 {name}，穩了。',
+  ],
+  DEFEND: [
+    '我是好人，不要投我！',
+    '我真的是平民，相信我。',
+    '你們投我是浪費票，聽我說。',
+    '我是好人陣營，別亂投。',
+    '投我等於幫狼人，你們冷靜點。',
+    '我是清白的，請聽我解釋。',
+    '我不知道為什麼你們懷疑我，我是好人。',
+    '我是正義陣營，這我可以發誓。',
+    '我沒說謊，我只是話少。',
+    '我發誓我是好人，請不要投我。',
+    '我是無辜的，你們搞錯了。',
+    '給我一個機會解釋，我真的是好人。',
+    '你們這樣懷疑我，我很難過。',
+    '我不是狼，請相信我。',
+    '要投我可以，但我保證你們會後悔。',
+  ],
+  CHAOS: [
+    '我什麼都不知道，我只是個平民。',
+    '我覺得我們應該全部投自己。',
+    '這個遊戲太難了，我選擇放棄思考。',
+    '我懷疑椅子。',
+    '我提議全部重新洗牌。',
+    '我已經放棄推理了，隨便投。',
+    '我感覺今天會有大事發生。',
+    '反正都要死，不如拉一個墊背的。',
+    '我覺得應該投給最活躍的人。',
+    '要不我們全部投給 GM？',
+    '我覺得我們應該先冷靜一下。',
+    '我什麼都不知道，我是無辜的。',
+    '誰投我我就投誰，大家一起死。',
+    '我在想如果我是狼人，我會不會告訴你們？',
+    '安安，我只是路過的。',
+  ],
+  SEER_CLAIM: [
+    '我是警察！請相信我。',
+    '我是預言家，我查過人了。',
+    '我是警察，我可以提供驗人資訊。',
+    '我是預言家，請大家跟我的票。',
+    '我真的是警察，請投我信任票。',
+  ],
+  SILENT: [
+    '{name} 也太安靜了吧，可疑。',
+    '{name} 都不說話，是不是在裝？',
+    '怎麼 {name} 都不講話？有鬼。',
+    '我建議先關注沉默的 {name}。',
+    '{name} 你倒是說句話啊。',
+    '{name} 一直不說話，我心很慌。',
+    '沉默的 {name} 最可疑。',
+    '{name} 你為什麼不說話？',
+  ],
 };
+
 function fillTemplate(tmpl, name) { return tmpl.replace(/\{name\}/g, name || ''); }
 function pickSpeech(category, name) {
   const pool = SPEECH[category] || SPEECH.CHAOS;
@@ -293,7 +392,7 @@ function pickSpeech(category, name) {
 }
 
 // ============================================================
-// 🧠 AI 上下文組裝
+// 🧠 AI 上下文
 // ============================================================
 function buildAiContext(room, ai) {
   const alive = room.players.filter(p => p.alive);
@@ -321,7 +420,7 @@ function buildAiContext(room, ai) {
     if (lines.length) checkInfo = `\n【你已知的查驗結果】\n${lines.join('\n')}`;
   }
 
-  const recent = (room.recentPublicChat || []).slice(-20);
+  const recent = (room.recentPublicChat || []).slice(-15);
   const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（目前還沒有人發言）';
 
   const playerList = alive.map(p => {
@@ -364,15 +463,18 @@ function buildAiContext(room, ai) {
     }
   });
 
+  const lastSpeaker = recent.length > 0 ? recent[recent.length - 1].from : null;
+
   return {
     campDesc, checkInfo, chatLog, playerList, suspLines, alive, others,
     deathLog, voteHistory,
     accusers: [...new Set(accusers)],
+    lastSpeaker,
   };
 }
 
 // ============================================================
-// 🗣 GPT 發言（含個性）
+// 🗣 GPT 發言
 // ============================================================
 async function aiSpeakWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
@@ -383,13 +485,18 @@ async function aiSpeakWithGPT(room, ai) {
     defendHint = `\n⚠️ ${ctx.accusers.join('、')} 曾經懷疑過你，請用你的個性風格回應。`;
   }
 
-  // 不同個性有不同字數建議
   let lengthHint = '25~40 字';
   if (ai.personality === 'LAZY') lengthHint = '10~15 字（話少）';
   if (ai.personality === 'TALKATIVE') lengthHint = '50~80 字（話多但沒重點）';
-  if (ai.personality === 'INTUITIVE') lengthHint = '20~35 字';
   if (ai.personality === 'HONEST') lengthHint = '40~60 字（禮貌又囉嗦）';
   if (ai.personality === 'IMPULSIVE') lengthHint = '15~30 字（帶驚嘆號）';
+
+  let interactionHint = '';
+  if (ctx.lastSpeaker && ctx.lastSpeaker !== ai.name) {
+    interactionHint = `\n⚠️ 【強制要求】你必須在發言中直接回應 ${ctx.lastSpeaker} 剛剛說的話，或引用某位玩家的名字與發言。`;
+  } else {
+    interactionHint = `\n⚠️ 【強制要求】你必須在發言中提到至少一位玩家的名字。`;
+  }
 
   const prompt = `你正在玩一場狼人殺遊戲，扮演一位玩家。
 
@@ -416,12 +523,17 @@ ${ctx.suspLines || '（暫無明顯懷疑對象）'}
 
 【你的任務】
 請用「${ai.personality}」的個性，發言 ${lengthHint}。
+${interactionHint}
+⚠️ 不要說空泛的話（例如「我覺得XX很怪」），要引用具體的發言內容或投票紀錄。
 ⚠️ 用繁體中文。直接輸出你的發言，不要加引號、玩家名字前綴、或任何說明。`;
 
   return await askGPT([
-    { role: 'system', content: '你是狼人殺遊戲的玩家，請完全依照指定的個性風格發言。用繁體中文。' },
+    {
+      role: 'system',
+      content: '你是狼人殺遊戲的高手玩家，擅長邏輯推理和話術。請完全依照指定的個性風格發言，並確實引用其他玩家的發言。'
+    },
     { role: 'user', content: prompt }
-  ], 120);
+  ], 150);
 }
 
 // ============================================================
@@ -499,7 +611,6 @@ function processChatForAI(room, speakerId, text) {
         if (ai.id === speakerId || ai.id === target.id) return;
         updateBelief(room, ai.id, target.id, +0.08, `${speaker.name} 指控`);
 
-        // 🎭 復仇型：記住指控者
         if (target.id === ai.id && (ai.personality === 'VENGEFUL' || ai.personality === 'PARANOID')) {
           ai.revengeTarget = speakerId;
         }
@@ -530,7 +641,7 @@ function recordPublicChat(room, fromName, text) {
 }
 
 // ============================================================
-// 🎯 AI 決策核心（含個性特殊行為）
+// 🎯 AI 決策核心
 // ============================================================
 function decideTargetByBelief(room, ai, context) {
   const personality = ai.personality || 'HONEST';
@@ -545,29 +656,21 @@ function decideTargetByBelief(room, ai, context) {
   if (context === 'DOCTOR_HEAL') candidates = room.players.filter(p => p.alive);
   if (!candidates.length) return null;
 
-  // 🎭 特殊個性行為（只在白天投票時觸發）
   if (context === 'VOTE') {
-    // 復仇型：死咬指控過自己的人
     if (personality === 'VENGEFUL' && ai.revengeTarget) {
       const target = candidates.find(p => p.id === ai.revengeTarget);
       if (target) return target.id;
     }
-
-    // 疑心病型：誰指責我我投誰（70% 機率）
     if (personality === 'PARANOID' && ai.revengeTarget && Math.random() < 0.7) {
       const target = candidates.find(p => p.id === ai.revengeTarget);
       if (target) return target.id;
     }
-
-    // 忠犬型：跟隨忠誠目標
     if (personality === 'LOYAL' && ai.loyalTarget) {
       const targetVote = room.votes[ai.loyalTarget];
       if (targetVote && candidates.find(p => p.id === targetVote)) {
         return targetVote;
       }
     }
-
-    // 樂子人：投給票數第二名（製造平票）
     if (personality === 'CHAOTIC' && Math.random() < 0.55) {
       const tally = tallyVotes(room);
       const sorted = Object.entries(tally).sort((a, b) => b[1] - a[1]);
@@ -576,8 +679,6 @@ function decideTargetByBelief(room, ai, context) {
         if (candidates.find(p => p.id === secondId)) return secondId;
       }
     }
-
-    // 佛系型：30% 棄票
     if (personality === 'LAZY' && Math.random() < 0.3) {
       return null;
     }
@@ -616,15 +717,12 @@ async function aiSpeak(room, ai) {
   if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
   if (room.phase === 'GAME_OVER') return;
 
-  // 🔮 警察跳警邏輯
   if (ai.role === 'SEER' && !ai.hasClaimedSeer) {
     const humanSeers = room.players.filter(p => p.role === 'SEER' && p.alive && !p.isAI);
-
     if (humanSeers.length === 0) {
       const otherAiClaimed = room.players.some(p =>
         p.role === 'SEER' && p.isAI && p.id !== ai.id && p.hasClaimedSeer
       );
-
       if (!otherAiClaimed) {
         const checks = room.seerChecks[ai.id] || {};
         const knownWolfId = Object.keys(checks).find(id => {
@@ -632,13 +730,11 @@ async function aiSpeak(room, ai) {
           const target = room.players.find(p => p.id === id);
           return target && target.alive;
         });
-
         if (knownWolfId) {
           const wolfName = nameOf(room, knownWolfId);
           const speech = `我是警察！我查驗了 ${wolfName}，他是狼人！請大家跟我一起投他！`;
           io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: speech });
           ai.hasClaimedSeer = true;
-
           Object.keys(room.aiBeliefs || {}).forEach(otherAiId => {
             if (otherAiId === ai.id) return;
             updateBelief(room, otherAiId, knownWolfId, +0.55, `${ai.name} 跳警指認`);
@@ -662,9 +758,18 @@ async function aiSpeak(room, ai) {
 
   const target = randomPick(alive);
   let category = 'ACCUSE';
+
+  switch (ai.personality) {
+    case 'LAZY': category = 'CHAOS'; break;
+    case 'IMPULSIVE':
+    case 'LOYAL': category = Math.random() < 0.6 ? 'FOLLOW' : 'ACCUSE'; break;
+    case 'TALKATIVE':
+    case 'CHAOTIC': category = 'CHAOS'; break;
+    case 'HONEST': category = Math.random() < 0.5 ? 'ACCUSE' : 'SILENT'; break;
+    default: category = 'ACCUSE';
+  }
+
   if (ai.role === 'SEER' && Math.random() < 0.15) category = 'SEER_CLAIM';
-  else if (ai.personality === 'CHAOTIC' || ai.personality === 'TALKATIVE') category = 'CHAOS';
-  else if (ai.personality === 'IMPULSIVE' || ai.personality === 'LOYAL') category = 'FOLLOW';
 
   io.to(room.roomId).emit('chat_message', {
     channel:'PUBLIC', from:ai.name, text: pickSpeech(category, target.name)
@@ -810,18 +915,19 @@ function checkWolfUnified(room) {
 }
 
 // ============================================================
-// AI 排程
+// AI 排程（🔑 調慢間隔以配合限速）
 // ============================================================
 function scheduleAiActions(room, phase) {
   const ais = room.players.filter(p => p.isAI && p.alive);
 
   if (phase === 'DAY_DISCUSS') {
+    // 🔑 每個 AI 間隔 22 秒（3 RPM 下 60/3=20 秒 + buffer）
     ais.forEach((ai, idx) => {
       setTimeout(async () => {
         if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
         if (room.phase === 'GAME_OVER') return;
         await aiSpeak(room, ai);
-      }, 2000 + idx * 10000);
+      }, 2000 + idx * 22000);
     });
   }
 
@@ -906,6 +1012,7 @@ function scheduleAiActions(room, phase) {
   }
 
   if (phase === 'DAY_VOTE') {
+    // 🔑 投票間隔也調慢
     ais.forEach((ai, idx) => {
       setTimeout(async () => {
         if (room.phase !== 'DAY_VOTE' || !ai.alive) return;
@@ -928,7 +1035,7 @@ function scheduleAiActions(room, phase) {
           clearTimeout(room.timer);
           setTimeout(() => resolveVote(room), 800);
         }
-      }, 2000 + idx * 8000);
+      }, 2000 + idx * 22000);
     });
   }
 }
@@ -968,7 +1075,7 @@ function judgeSpeech(room, phase) {
 }
 
 // ============================================================
-// 階段切換（含遊戲凍結）
+// 階段切換
 // ============================================================
 function phasePayload(room, player, speechText) {
   const data = { selectableIds: [] };
@@ -1120,7 +1227,6 @@ function startGame(room) {
     p.loyalTarget = null;
   });
 
-  // 🎭 忠犬型：隨機挑一個忠誠對象
   const loyalAis = room.players.filter(p => p.isAI && p.personality === 'LOYAL');
   loyalAis.forEach(ai => {
     const candidates = room.players.filter(p => p.id !== ai.id);
@@ -1264,9 +1370,6 @@ function resolveVote(room) {
   beginNight(room);
 }
 
-// ============================================================
-// 🎯 勝負判定（含遊戲凍結）
-// ============================================================
 function checkWin(room) {
   if (room.phase === 'GAME_OVER') return true;
   const alive = room.players.filter(p => p.alive);
@@ -1281,22 +1384,14 @@ function checkWin(room) {
   else if (evils.length >= alive.length - evils.length) { winner = 'WOLF'; reason = '邪惡方數量已不低於正義方，邪惡陣營勝利！'; }
 
   if (winner) {
-    // 🔑 凍結遊戲：清除所有計時器
     clearTimeout(room.timer);
     room.phase = 'GAME_OVER';
     room.endsAt = null;
-
-    // 🔑 廣播遊戲結束，附帶所有玩家身分
     io.to(room.roomId).emit('game_over', {
       winner, reason,
       players: room.players.map(p => ({
-        id: p.id,
-        name: p.name,
-        alive: p.alive,
-        isHost: p.isHost,
-        isAI: !!p.isAI,
-        role: p.role,
-        isRevealed: true
+        id: p.id, name: p.name, alive: p.alive, isHost: p.isHost,
+        isAI: !!p.isAI, role: p.role, isRevealed: true
       })),
     });
     return true;
