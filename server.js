@@ -488,7 +488,33 @@ function decideTargetByBelief(room, ai, context) {
 
 async function aiSpeak(room, ai) {
   if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
+async function aiSpeak(room, ai) {
+  if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
 
+  // 🔮 警察跳警：查到狼人時主動公佈身分
+  if (ai.role === 'SEER' && !ai.hasClaimedSeer) {
+    const checks = room.seerChecks[ai.id] || {};
+    const knownWolfId = Object.keys(checks).find(id => {
+      if (checks[id] !== 'WOLF') return false;
+      const target = room.players.find(p => p.id === id);
+      return target && target.alive;
+    });
+    if (knownWolfId) {
+      const wolfName = nameOf(room, knownWolfId);
+      const speech = `我是警察！我查驗了 ${wolfName}，他是狼人！請大家跟我一起投他！`;
+      io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: speech });
+      ai.hasClaimedSeer = true;
+
+      // 🧠 讓所有 AI 大幅提升對該目標的懷疑度
+      Object.keys(room.aiBeliefs || {}).forEach(otherAiId => {
+        if (otherAiId === ai.id) return;
+        updateBelief(room, otherAiId, knownWolfId, +0.55, `${ai.name} 跳警指認`);
+      });
+      return;
+    }
+  }
+
+  if (USE_GPT) {
   if (USE_GPT) {
     const text = await aiSpeakWithGPT(room, ai);
     if (text && room.phase === 'DAY_DISCUSS' && ai.alive) {
@@ -948,6 +974,7 @@ function startGame(room) {
     p.role = roles[i];
     p.deathCause = null;
     p.canSpeakInPublic = false;
+    p.hasClaimedSeer = false;
   });
 
   room.day = 0;
