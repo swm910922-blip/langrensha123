@@ -39,12 +39,12 @@ const GROQ_MODEL_CANDIDATES = [
 ];
 
 const GEMINI_MODEL_CANDIDATES = [
-  'gemini-2.5-flash',
-  'gemini-2.5-pro',
-  'gemini-2.0-flash',
-  'gemini-flash-latest',
+  'gemini-flash-latest',           // ✅ 你帳號確認可用
+  'gemini-3.6-flash',              // ✅ 最新穩定版
+  'gemini-3.5-flash',              // ✅ 備用
+  'gemini-3.1-flash-lite',         // ✅ 更省額度
+  'gemini-flash-lite-latest',      // ✅ 最後備用
 ];
-
 let activeGroqModel = null;
 let activeGeminiModel = null;
 let activeGeminiApiVersion = 'v1beta';
