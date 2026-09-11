@@ -129,8 +129,43 @@ async function detectGroqModel() {
 // ============================================================
 // 🔍 Gemini 模型偵測
 // ============================================================
+// 🔍 Gemini 模型偵測（debug 版）
+// ============================================================
 async function detectGeminiModel() {
-  const apiVersions = ['v1', 'v1beta'];
+  console.log('[Gemini] 開始偵測');
+  console.log('[Gemini] 金鑰前 8 碼：', (GEMINI_API_KEY || '').slice(0, 8) + '...');
+  console.log('[Gemini] 金鑰長度：', (GEMINI_API_KEY || '').length);
+
+  if (!GEMINI_API_KEY) {
+    console.error('[Gemini] ❌ 環境變數 GEMINI_API_KEY 是空的！');
+    return null;
+  }
+
+  // 先列出帳號可用的模型
+  try {
+    const listRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`
+    );
+    console.log('[Gemini] 列出模型 HTTP 狀態：', listRes.status);
+
+    if (listRes.ok) {
+      const listData = await listRes.json();
+      const names = (listData.models || []).map(m => m.name);
+      console.log('[Gemini] 帳號可用模型清單：');
+      names.forEach(n => console.log('  -', n));
+    } else {
+      const errText = await listRes.text();
+      console.error('[Gemini] ❌ 列出模型失敗：', listRes.status);
+      console.error('[Gemini] 錯誤內容：', errText.slice(0, 400));
+      return null;
+    }
+  } catch (e) {
+    console.error('[Gemini] ❌ 列出模型例外：', e.message);
+    return null;
+  }
+
+  // 逐個測試候選模型
+  const apiVersions = ['v1beta', 'v1'];
   for (const version of apiVersions) {
     for (const model of GEMINI_MODEL_CANDIDATES) {
       try {
@@ -143,15 +178,22 @@ async function detectGeminiModel() {
             generationConfig: { maxOutputTokens: 3 }
           })
         });
+
         if (res.ok) {
           console.log(`[Gemini] ✅ 可用模型: ${model} (API: ${version})`);
           activeGeminiApiVersion = version;
           return model;
         }
-        if (res.status === 404) continue;
-      } catch (e) {}
+
+        const errBody = await res.text();
+        console.warn(`[Gemini] ❌ ${model} (${version}) → HTTP ${res.status}: ${errBody.slice(0, 200)}`);
+      } catch (e) {
+        console.warn(`[Gemini] ❌ ${model} (${version}) 例外：${e.message}`);
+      }
     }
   }
+
+  console.warn('[Gemini] 所有候選模型都失敗');
   return null;
 }
 
