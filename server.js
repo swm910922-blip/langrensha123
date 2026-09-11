@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v5.2（GPT + 警察跳警 + 請求排隊）
+// 狼人殺後端 v5.3（GPT + 警察跳警優化 + 請求排隊）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -487,30 +487,46 @@ function decideTargetByBelief(room, ai, context) {
 }
 
 // ============================================================
-// 🗣 AI 發言（含警察跳警）
+// 🗣 AI 發言（含警察跳警優化）
 // ============================================================
 async function aiSpeak(room, ai) {
   if (room.phase !== 'DAY_DISCUSS' || !ai.alive) return;
 
-  // 🔮 警察跳警：查到狼人時主動公佈身分
+  // 🔮 警察跳警邏輯（優化版）
   if (ai.role === 'SEER' && !ai.hasClaimedSeer) {
-    const checks = room.seerChecks[ai.id] || {};
-    const knownWolfId = Object.keys(checks).find(id => {
-      if (checks[id] !== 'WOLF') return false;
-      const target = room.players.find(p => p.id === id);
-      return target && target.alive;
-    });
-    if (knownWolfId) {
-      const wolfName = nameOf(room, knownWolfId);
-      const speech = `我是警察！我查驗了 ${wolfName}，他是狼人！請大家跟我一起投他！`;
-      io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: speech });
-      ai.hasClaimedSeer = true;
+    // 檢查隊裡有沒有真人警察
+    const humanSeers = room.players.filter(p => p.role === 'SEER' && p.alive && !p.isAI);
 
-      Object.keys(room.aiBeliefs || {}).forEach(otherAiId => {
-        if (otherAiId === ai.id) return;
-        updateBelief(room, otherAiId, knownWolfId, +0.55, `${ai.name} 跳警指認`);
-      });
-      return;
+    // ✅ 有真人隊友 → AI 全部不跳
+    if (humanSeers.length === 0) {
+      // 檢查是否已經有其他 AI 警察跳警過
+      const otherAiClaimed = room.players.some(p =>
+        p.role === 'SEER' && p.isAI && p.id !== ai.id && p.hasClaimedSeer
+      );
+
+      // ✅ 沒有其他 AI 跳過 → 這個 AI 可以跳
+      if (!otherAiClaimed) {
+        const checks = room.seerChecks[ai.id] || {};
+        const knownWolfId = Object.keys(checks).find(id => {
+          if (checks[id] !== 'WOLF') return false;
+          const target = room.players.find(p => p.id === id);
+          return target && target.alive;
+        });
+
+        if (knownWolfId) {
+          const wolfName = nameOf(room, knownWolfId);
+          const speech = `我是警察！我查驗了 ${wolfName}，他是狼人！請大家跟我一起投他！`;
+          io.to(room.roomId).emit('chat_message', { channel:'PUBLIC', from:ai.name, text: speech });
+          ai.hasClaimedSeer = true;
+
+          // 讓所有 AI 大幅提升對該目標的懷疑度
+          Object.keys(room.aiBeliefs || {}).forEach(otherAiId => {
+            if (otherAiId === ai.id) return;
+            updateBelief(room, otherAiId, knownWolfId, +0.55, `${ai.name} 跳警指認`);
+          });
+          return;
+        }
+      }
     }
   }
 
