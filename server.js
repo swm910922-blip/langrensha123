@@ -594,7 +594,11 @@ const PERSONALITY_WEIGHTS = {
 function getLastSpeaker(room, ai) {
   const recent = room.recentPublicChat || [];
   for (let i = recent.length - 1; i >= 0; i--) {
-    if (recent[i].from !== ai.name) return recent[i].from;
+    if (recent[i].from === ai.name) continue;
+    // ✅ 跳過已死亡的玩家
+    const speaker = room.players.find(p => p.name === recent[i].from);
+    if (speaker && !speaker.alive) continue;
+    return recent[i].from;
   }
   return null;
 }
@@ -736,8 +740,12 @@ function buildAiContext(room, ai) {
     if (lines.length) checkInfo = `\n【你已知的查驗結果】\n${lines.join('\n')}`;
   }
 
-  const recent = (room.recentPublicChat || []).slice(-10);
-  const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（目前還沒有人發言）';
+  // ✅ 過濾掉死者的訊息（只保留存活玩家的對話）
+const recent = (room.recentPublicChat || []).filter(m => {
+  const speaker = room.players.find(p => p.name === m.from);
+  return speaker ? speaker.alive : true;   // 找不到就保留（例如系統訊息）
+}).slice(-10);
+const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（目前還沒有人發言）';
 
   const playerList = alive.map(p => {
     let tag = '';
@@ -834,7 +842,8 @@ ${ctx.myHistory || '（還沒發言過）'}
 9. 必須提到至少一位玩家名字。
 10. 不要重複自己之前說過的原句。
 11. 必須符合自己的個性。
-12. 直接輸出發言，不要引號、不要條列、不要換行。`;
+12. 直接輸出發言，不要引號、不要條列、不要換行。`
+13. 絕對不要回應或提到已死亡的玩家，他們已經不能發言了。;
 
   return await askGPT([
     { role: 'system', content: '你是狼人殺玩家，依個性發言，並保持立場一致。用繁體中文。' },
@@ -1518,7 +1527,10 @@ function setPhase(room, phase) {
     : (PHASE_SECONDS[phase] || 20);
 
   room.endsAt = Date.now() + sec*1000;
-  if (phase === 'DAY_VOTE') room.votes = {};
+ if (phase === 'DAY_VOTE') {
+  room.votes = {};
+  room.voteFinalizeScheduled = false;
+}
   if (phase === 'NIGHT_SEER') {
     room.seerVotes = {};
     room.seerResolved = false;
@@ -1706,6 +1718,7 @@ function resolveNight(room) {
 // ============================================================
 function resolveVote(room) {
   if (room.phase !== 'DAY_VOTE') return;
+  room.voteFinalizeScheduled = false;
 
   const lines = [];
   Object.keys(room.votes).forEach(voterId => {
@@ -2066,7 +2079,8 @@ io.on('connection', socket => {
     if (!room || room.phase !== 'DAY_VOTE') return;
     const me = room.players.find(p => p.id === socket.id);
     if (!me || !me.alive) return;
-    if (room.votes[me.id] !== undefined) return;
+
+    // ✅ 移除「已投過就 return」的檢查，允許改票
     room.votes[me.id] = (payload && payload.targetId) || null;
 
     io.to(room.roomId).emit('vote_updated', {
@@ -2074,13 +2088,21 @@ io.on('connection', socket => {
       voteDetail: { ...room.votes }
     });
     broadcastTeammateVotes(room);
+
+    // ✅ 全部投完後，等 15 秒緩衝（可改票），再結算
     const aliveCount = room.players.filter(p => p.alive).length;
     if (Object.keys(room.votes).length >= aliveCount) {
-      clearTimeout(room.timer);
-      setTimeout(() => resolveVote(room), 800);
+      if (!room.voteFinalizeScheduled) {
+        room.voteFinalizeScheduled = true;
+        setTimeout(() => {
+          if (room.phase === 'DAY_VOTE') {
+            clearTimeout(room.timer);
+            resolveVote(room);
+          }
+        }, 15000);
+      }
     }
   });
-
   socket.on('chat_send', payload => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
@@ -2099,8 +2121,6 @@ io.on('connection', socket => {
       me.canSpeakInPublic = false;
       const msg = { channel, from: me.name, text: '【遺言】' + text };
       io.to(room.roomId).emit('chat_message', msg);
-      room.players.filter(p => !p.alive && !p.isAI)
-        .forEach(p => io.to(p.id).emit('chat_message', msg));
       recordPublicChat(room, me.name, text);
       trackSpeak(room, me.id);
       processChatForAI(room, me.id, text);
