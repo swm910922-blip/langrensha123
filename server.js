@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v12.1（OpenAI + 開場/回應分離 + 深度思考）
+// 狼人殺後端 v12.2（OpenAI + 開場/回應分離 + 無人自動停損）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -649,7 +649,7 @@ function recordAiSpeech(room, ai, text) {
 }
 
 // ============================================================
-// 🧠 buildAiContext（分離今天 vs 歷史）
+// 🧠 buildAiContext
 // ============================================================
 function buildAiContext(room, ai) {
   const alive = room.players.filter(p => p.alive);
@@ -748,7 +748,6 @@ function buildAiContext(room, ai) {
     .filter(p => !p.alive && p.role)
     .map(p => `${p.name} 是 ${roleLabel(p.role)}`);
 
-  // ✅ 今天的對話（只算今天、過濾死者與系統訊息）
   const todayMessages = (room.recentPublicChat || [])
     .filter(m => m.day === room.day)
     .filter(m => !m.system)
@@ -760,7 +759,6 @@ function buildAiContext(room, ai) {
     ? todayMessages.map(m => `${m.from}：${m.text}`).join('\n')
     : '（今天還沒有人發言）';
 
-  // ✅ 歷史對話（前幾天，只保留最近 8 條）
   const historyMessages = (room.recentPublicChat || [])
     .filter(m => m.day < room.day)
     .filter(m => !m.system)
@@ -869,7 +867,7 @@ ${isFirstSpeaker ? `⚠️ **你是今天第一個發言的人**
 }
 
 // ============================================================
-// 🗳 GPT 投票（反思式 Prompt）
+// 🗳 GPT 投票
 // ============================================================
 async function aiVoteWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
@@ -974,7 +972,6 @@ function trackSpeak(room, speakerId) {
   room.speakCount[speakerId] = (room.speakCount[speakerId] || 0) + 1;
 }
 
-// ✅ 加上 day 欄位
 function recordPublicChat(room, fromName, text) {
   if (!room.recentPublicChat) room.recentPublicChat = [];
   room.recentPublicChat.push({ from: fromName, text, ts: Date.now(), day: room.day });
@@ -1634,7 +1631,6 @@ function nextAfterDoctor(room) {
 // 🎮 遊戲開始 / 初始化
 // ============================================================
 function startGame(room) {
-  // ✅ 開局前徹底清空所有對話記憶
   room.recentPublicChat = [];
   room.speakCount = {};
   room.voteHistory = [];
@@ -1835,7 +1831,7 @@ function checkWin(room) {
 }
 
 // ============================================================
-// 🚪 離線 / 離開處理
+// 🚪 離線 / 離開處理（含無人自動停損）
 // ============================================================
 function handleLeave(socket) {
   const roomId = socket.data.roomId;
@@ -1862,6 +1858,17 @@ function handleLeave(socket) {
   if (room.votes) delete room.votes[removed.id];
   if (room.wolfVotes) delete room.wolfVotes[removed.id];
   if (room.seerVotes) delete room.seerVotes[removed.id];
+
+  // ✅ 如果所有人類玩家都走了，遊戲立即停止並刪除房間（避免 AI 繼續燒 API）
+  const hasHumanPlayer = room.players.some(p => !p.isAI);
+  if (!hasHumanPlayer) {
+    clearTimeout(room.timer);
+    room.phase = 'GAME_OVER';
+    room.aiDiscussionRunning = false;
+    console.log(`[Room ${roomId}] 所有人類玩家已離開，遊戲自動結束，房間已刪除`);
+    rooms.delete(roomId);
+    return;
+  }
 
   if (inGame) {
     broadcastPlayers(room);
@@ -1930,7 +1937,6 @@ io.on('connection', socket => {
     if (room.players.length >= 18) return cb && cb({ ok:false, error:'房間已滿' });
     if (room.players.some(p => p.name === nickname)) return cb && cb({ ok:false, error:'暱稱已被使用' });
 
-    // ✅ 偵測殘留資料，自動重置
     if (room.recentPublicChat?.length > 0 || room.voteHistory?.length > 0) {
       console.log(`[Room ${roomId}] 偵測到殘留資料，自動重置`);
       room.day = 0;
