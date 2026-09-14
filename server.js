@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v11.6（警察查驗顯示完整職業）
+// 狼人殺後端 v12.0（OpenAI + 深度思考 + 說謊帶風向）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -32,27 +32,34 @@ const GROQ_MODEL_CANDIDATES = [
   'llama-3.1-8b-instant',
   'llama-3.3-70b-versatile',
   'openai/gpt-oss-20b',
-  'openai/gpt-oss-120b',
-  'groq/compound-mini',
-  'groq/compound',
 ];
 
 const GEMINI_MODEL_CANDIDATES = [
-  'gemini-3.1-flash-lite',
-  'gemini-3.5-flash',
   'gemini-3.6-flash',
-  'gemini-flash-latest',
-  'gemini-flash-lite-latest',
+  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite',
+];
+
+// ✅ OpenAI 模型候選（優先順序）
+const OPENAI_MODEL_CANDIDATES = [
+  'gpt-4o-mini',       // 便宜、快、遵循指令好
+  'gpt-4o',            // 更聰明，較貴
+  'gpt-4-turbo',       // 備用
 ];
 
 let activeGroqModel = null;
 let activeGeminiModel = null;
+let activeOpenAIModel = null;
 let activeGeminiApiVersion = 'v1beta';
 let PROVIDER = 'NONE';
 let MODEL_NAME = '';
 let RPM_LIMIT = 3;
 
-if (GROQ_API_KEY) {
+if (OPENAI_API_KEY) {
+  PROVIDER = 'OPENAI';
+  MODEL_NAME = 'gpt-4o-mini';
+  RPM_LIMIT = 60;
+} else if (GROQ_API_KEY) {
   PROVIDER = 'GROQ';
   MODEL_NAME = 'detecting...';
   RPM_LIMIT = 10;
@@ -60,24 +67,23 @@ if (GROQ_API_KEY) {
   PROVIDER = 'GEMINI';
   MODEL_NAME = 'detecting...';
   RPM_LIMIT = 12;
-} else if (OPENAI_API_KEY) {
-  PROVIDER = 'OPENAI';
-  MODEL_NAME = 'gpt-4o-mini';
-  RPM_LIMIT = 3;
 }
 
 let USE_GPT = PROVIDER !== 'NONE';
 
-const GPT_SPEAK_PROB = PROVIDER === 'GROQ' ? 0.4
+const GPT_SPEAK_PROB = PROVIDER === 'OPENAI' ? 0.9
+  : PROVIDER === 'GROQ' ? 0.4
   : PROVIDER === 'GEMINI' ? 0.55 : 0.3;
-const GPT_VOTE_PROB = PROVIDER === 'GROQ' ? 0.6
+
+const GPT_VOTE_PROB = PROVIDER === 'OPENAI' ? 0.9
+  : PROVIDER === 'GROQ' ? 0.6
   : PROVIDER === 'GEMINI' ? 0.85 : 0.4;
 
 console.log(`========================================`);
 console.log(`🐺 狼人殺伺服器啟動`);
 console.log(`🤖 AI Provider: ${PROVIDER}`);
 if (USE_GPT) {
-  console.log(`📦 使用模型: 自動偵測中...`);
+  console.log(`📦 使用模型: ${MODEL_NAME}`);
   console.log(`⚡ 限速: ${RPM_LIMIT} RPM`);
 }
 console.log(`========================================`);
@@ -90,36 +96,20 @@ async function detectGroqModel() {
     const res = await fetch('https://api.groq.com/openai/v1/models', {
       headers: { 'Authorization': `Bearer ${GROQ_API_KEY}` },
     });
-    if (!res.ok) {
-      console.warn('[Groq] 無法取得模型清單', res.status);
-      return null;
-    }
+    if (!res.ok) return null;
     const data = await res.json();
     const allModels = (data.data || []).map(m => m.id);
-    console.log(`[Groq] 所有可用模型: ${allModels.join(', ')}`);
-
     const excludeKeywords = ['tts', 'whisper', 'orpheus', 'playai', 'audio', 'speech', 'voice', 'prompt-guard', 'safeguard'];
     const chatModels = allModels.filter(id => {
       const lower = id.toLowerCase();
       return !excludeKeywords.some(kw => lower.includes(kw));
     });
-
-    console.log(`[Groq] 聊天模型: ${chatModels.join(', ')}`);
-
     for (const model of GROQ_MODEL_CANDIDATES) {
-      if (chatModels.includes(model)) {
-        console.log(`[Groq] ✅ 選用模型: ${model}`);
-        return model;
-      }
+      if (chatModels.includes(model)) return model;
     }
-    if (chatModels.length > 0) {
-      console.log(`[Groq] ✅ 選用第一個聊天模型: ${chatModels[0]}`);
-      return chatModels[0];
-    }
-    console.warn('[Groq] ❌ 沒有可用的聊天模型');
+    if (chatModels.length > 0) return chatModels[0];
     return null;
   } catch (e) {
-    console.warn('[Groq] 偵測錯誤', e.message);
     return null;
   }
 }
@@ -128,37 +118,7 @@ async function detectGroqModel() {
 // 🔍 Gemini 模型偵測
 // ============================================================
 async function detectGeminiModel() {
-  console.log('[Gemini] 開始偵測');
-  console.log('[Gemini] 金鑰前 8 碼：', (GEMINI_API_KEY || '').slice(0, 8) + '...');
-  console.log('[Gemini] 金鑰長度：', (GEMINI_API_KEY || '').length);
-
-  if (!GEMINI_API_KEY) {
-    console.error('[Gemini] ❌ 環境變數 GEMINI_API_KEY 是空的！');
-    return null;
-  }
-
-  try {
-    const listRes = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`
-    );
-    console.log('[Gemini] 列出模型 HTTP 狀態：', listRes.status);
-
-    if (listRes.ok) {
-      const listData = await listRes.json();
-      const names = (listData.models || []).map(m => m.name);
-      console.log('[Gemini] 帳號可用模型清單：');
-      names.forEach(n => console.log('  -', n));
-    } else {
-      const errText = await listRes.text();
-      console.error('[Gemini] ❌ 列出模型失敗：', listRes.status);
-      console.error('[Gemini] 錯誤內容：', errText.slice(0, 400));
-      return null;
-    }
-  } catch (e) {
-    console.error('[Gemini] ❌ 列出模型例外：', e.message);
-    return null;
-  }
-
+  if (!GEMINI_API_KEY) return null;
   const apiVersions = ['v1beta', 'v1'];
   for (const version of apiVersions) {
     for (const model of GEMINI_MODEL_CANDIDATES) {
@@ -172,22 +132,13 @@ async function detectGeminiModel() {
             generationConfig: { maxOutputTokens: 20 }
           })
         });
-
         if (res.ok) {
-          console.log(`[Gemini] ✅ 可用模型: ${model} (API: ${version})`);
           activeGeminiApiVersion = version;
           return model;
         }
-
-        const errBody = await res.text();
-        console.warn(`[Gemini] ❌ ${model} (${version}) → HTTP ${res.status}: ${errBody.slice(0, 200)}`);
-      } catch (e) {
-        console.warn(`[Gemini] ❌ ${model} (${version}) 例外：${e.message}`);
-      }
+      } catch (e) {}
     }
   }
-
-  console.warn('[Gemini] 所有候選模型都失敗');
   return null;
 }
 
@@ -234,13 +185,12 @@ function enqueue(fn) {
 }
 
 // ============================================================
-// 🚀 Groq API（含重試）
+// 🚀 Groq API
 // ============================================================
 async function callGroq(messages, maxTokens) {
   const model = activeGroqModel || MODEL_NAME;
   const MAX_RETRY = 3;
   let lastErr = null;
-
   for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
@@ -251,54 +201,27 @@ async function callGroq(messages, maxTokens) {
           'Authorization': `Bearer ${GROQ_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          model,
-          messages,
-          max_tokens: maxTokens,
-          temperature: 0.9,
-        }),
+        body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.9 }),
         signal: controller.signal,
       });
       clearTimeout(timeout);
-
-      if (res.status === 429) {
-        const retryAfter = parseFloat(res.headers.get('retry-after')) || (2 ** attempt);
-        console.warn(`[Groq] 429 → 等待 ${retryAfter.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY})`);
-        await new Promise(r => setTimeout(r, retryAfter * 1000));
-        lastErr = 'rate_limit';
+      if (res.status === 429 || res.status === 503) {
+        await new Promise(r => setTimeout(r, ((2 ** attempt) + Math.random()) * 1000));
         continue;
       }
-      if (res.status === 503 || res.status === 500 || res.status === 502) {
-        const wait = (2 ** attempt) + Math.random();
-        console.warn(`[Groq] ${res.status} → 等待 ${wait.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY})`);
-        await new Promise(r => setTimeout(r, wait * 1000));
-        lastErr = `http_${res.status}`;
-        continue;
-      }
-      if (!res.ok) {
-        console.warn('[Groq]', res.status, (await res.text()).slice(0, 150));
-        return null;
-      }
-
+      if (!res.ok) return null;
       const data = await res.json();
       return data.choices?.[0]?.message?.content?.trim() || null;
     } catch (e) {
       clearTimeout(timeout);
       lastErr = e.message;
-      if (attempt < MAX_RETRY - 1) {
-        const wait = (2 ** attempt) + Math.random();
-        console.warn(`[Groq] 例外 → 等待 ${wait.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY}):`, e.message);
-        await new Promise(r => setTimeout(r, wait * 1000));
-        continue;
-      }
     }
   }
-  console.warn(`[Groq] 放棄重試，最後錯誤：${lastErr}`);
   return null;
 }
 
 // ============================================================
-// 🤖 Gemini API（含重試 + 關思考）
+// 🤖 Gemini API
 // ============================================================
 async function callGemini(messages, maxTokens) {
   if (!activeGeminiModel) return null;
@@ -311,21 +234,20 @@ async function callGemini(messages, maxTokens) {
     })),
     generationConfig: {
       maxOutputTokens: maxTokens,
-      temperature: 0.9,
+      temperature: 0.95,
       thinkingConfig: { thinkingBudget: 0 }
     }
   };
   if (systemMsg) body.systemInstruction = { parts: [{ text: systemMsg.content }] };
 
-  const url = `https://generativelanguage.googleapis.com/${activeGeminiApiVersion}/models/${activeGeminiModel}:generateContent?key=${GEMINI_API_KEY}`;
-
-  const MAX_RETRY = 3;
-  let lastErr = null;
+  const MAX_RETRY = 4;
+  const modelChain = [activeGeminiModel, ...GEMINI_MODEL_CANDIDATES.filter(m => m !== activeGeminiModel)];
 
   for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
+    const useModel = modelChain[attempt % modelChain.length];
+    const url = `https://generativelanguage.googleapis.com/${activeGeminiApiVersion}/models/${useModel}:generateContent?key=${GEMINI_API_KEY}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 45000);
-
     try {
       const res = await fetch(url, {
         method: 'POST',
@@ -334,76 +256,91 @@ async function callGemini(messages, maxTokens) {
         signal: controller.signal,
       });
       clearTimeout(timeout);
+      if (res.status === 429 || res.status === 503 || res.status === 500 || res.status === 502 || res.status === 404) {
+        await new Promise(r => setTimeout(r, ((2 ** attempt) + Math.random()) * 1000));
+        continue;
+      }
+      if (!res.ok) {
+        const errText = await res.text();
+        if (res.status === 400 && errText.includes('thinkingConfig') && attempt === 0) {
+          delete body.generationConfig.thinkingConfig;
+          continue;
+        }
+        return null;
+      }
+      const data = await res.json();
+      return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+    } catch (e) {
+      clearTimeout(timeout);
+    }
+  }
+  return null;
+}
+
+// ============================================================
+// 🤖 OpenAI API（主力）
+// ============================================================
+async function callOpenAI(messages, maxTokens) {
+  const MAX_RETRY = 3;
+  let lastErr = null;
+  const modelChain = [activeOpenAIModel || 'gpt-4o-mini', ...OPENAI_MODEL_CANDIDATES.filter(m => m !== activeOpenAIModel)];
+
+  for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
+    const useModel = modelChain[attempt % modelChain.length];
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OPENAI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: useModel,
+          messages,
+          max_tokens: maxTokens,
+          temperature: 0.95,
+          presence_penalty: 0.6,      // ✅ 避免重複用詞
+          frequency_penalty: 0.4,     // ✅ 增加用詞多樣性
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
 
       if (res.status === 429) {
         const retryAfter = parseFloat(res.headers.get('retry-after')) || (2 ** attempt);
-        console.warn(`[Gemini] 429 → 等待 ${retryAfter.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY})`);
+        console.warn(`[OpenAI] ${useModel} 429 → 等待 ${retryAfter.toFixed(1)}s`);
         await new Promise(r => setTimeout(r, retryAfter * 1000));
         lastErr = 'rate_limit';
         continue;
       }
       if (res.status === 503 || res.status === 500 || res.status === 502) {
         const wait = (2 ** attempt) + Math.random();
-        console.warn(`[Gemini] ${res.status} → 等待 ${wait.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY})`);
+        console.warn(`[OpenAI] ${useModel} ${res.status} → 換模型重試`);
         await new Promise(r => setTimeout(r, wait * 1000));
         lastErr = `http_${res.status}`;
         continue;
       }
       if (!res.ok) {
         const errText = await res.text();
-        if (res.status === 400 && errText.includes('thinkingConfig') && attempt === 0) {
-          console.warn('[Gemini] thinkingConfig 不支援，移除後重試');
-          delete body.generationConfig.thinkingConfig;
-          continue;
-        }
-        console.warn('[Gemini]', res.status, errText.slice(0, 150));
+        console.warn('[OpenAI]', res.status, errText.slice(0, 200));
         return null;
       }
 
       const data = await res.json();
-      return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+      return data.choices?.[0]?.message?.content?.trim() || null;
     } catch (e) {
       clearTimeout(timeout);
       lastErr = e.message;
       if (attempt < MAX_RETRY - 1) {
-        const wait = (2 ** attempt) + Math.random();
-        console.warn(`[Gemini] 例外 → 等待 ${wait.toFixed(1)}s 重試 (${attempt + 1}/${MAX_RETRY}):`, e.message);
-        await new Promise(r => setTimeout(r, wait * 1000));
+        await new Promise(r => setTimeout(r, ((2 ** attempt) + Math.random()) * 1000));
         continue;
       }
     }
   }
-  console.warn(`[Gemini] 放棄重試，最後錯誤：${lastErr}`);
+  console.warn(`[OpenAI] 放棄重試，最後錯誤：${lastErr}`);
   return null;
-}
-
-// ============================================================
-// 🤖 OpenAI API
-// ============================================================
-async function callOpenAI(messages, maxTokens) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
-  try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: MODEL_NAME, messages, max_tokens: maxTokens, temperature: 0.9,
-      }),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (res.status === 429) { console.warn('[OpenAI] 429 → 改用模板'); return null; }
-    if (!res.ok) { console.warn('[OpenAI]', res.status); return null; }
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content?.trim() || null;
-  } catch (e) {
-    clearTimeout(timeout);
-    throw e;
-  }
 }
 
 // ============================================================
@@ -413,9 +350,9 @@ async function askGPT(messages, maxTokens = 120) {
   if (!USE_GPT) return null;
   return enqueue(async () => {
     try {
+      if (PROVIDER === 'OPENAI') return await callOpenAI(messages, maxTokens);
       if (PROVIDER === 'GROQ') return await callGroq(messages, maxTokens);
       if (PROVIDER === 'GEMINI') return await callGemini(messages, maxTokens);
-      if (PROVIDER === 'OPENAI') return await callOpenAI(messages, maxTokens);
       return null;
     } catch (e) {
       console.warn(`[${PROVIDER} error]`, e.message);
@@ -438,7 +375,6 @@ function nameOf(room, id) { return room.players.find(x=>x.id===id)?.name || '未
 function roleName(role) {
   return { WEREWOLF:'🐺 狼人', SNIPER:'🎯 狙擊手', SEER:'🔮 警察', DOCTOR:'💉 醫生', VILLAGER:'👤 平民' }[role] || role;
 }
-// ✅ 完整職業標籤
 function roleLabel(role) {
   if (role === 'WEREWOLF') return '🐺 狼人';
   if (role === 'SNIPER')   return '🎯 狙擊手';
@@ -573,17 +509,18 @@ const AI_PERSONALITIES = [
   'CHAOTIC', 'LOYAL', 'HONEST', 'TALKATIVE', 'VENGEFUL',
 ];
 
+// ✅ 強化版個性描述（更有畫面感）
 const PERSONALITY_TONE = {
-  ANALYTICAL: '你是【冷靜分析型】。發言條理分明、客觀，喜歡引用過往的投票軌跡與邏輯進行推斷。',
-  IMPULSIVE:  '你是【衝動跟風型】。說話直率、容易緊張，常用驚嘆號，容易被別人帶風向。',
-  LAZY:       '你是【划水佛系型】。話少、句子短（如「我覺得都行」「先觀望」），盡量不引人注目。',
-  PARANOID:   '你是【傲嬌疑心病型】。容易懷疑別人，講話帶有防禦性，誰指責你你就反嗆回去。',
-  INTUITIVE:  '你是【直覺神棍型】。不靠邏輯全憑第六感，會說「我昨晚夢到 XX 身上有狼味」這類的話。',
-  CHAOTIC:    '你是【混亂邪惡型】。唯恐天下不亂，喜歡拱火、故意搞亂局勢。',
-  LOYAL:      '你是【盲從忠犬型】。你心中認定場上某一位玩家是好人，會強烈維護對方。',
-  HONEST:     '你是【老實人型】。講話非常禮貌、規矩、稍微有點冗長。',
-  TALKATIVE:  '你是【話癆廢話王型】。字數很多但完全沒有重點，喜歡打太極、講廢話。',
-  VENGEFUL:   '你是【死磕復仇型】。只要有人懷疑過你一次，你就會死咬著對方不放。',
+  ANALYTICAL: '你是【冷靜分析型】。講話有條理，會引用具體發言或投票紀錄推理，語氣冷靜、不帶情緒。',
+  IMPULSIVE:  '你是【衝動跟風型】。講話直率、情緒化，常用「！」，容易被別人帶風向，也容易反悔。',
+  LAZY:       '你是【划水佛系型】。話很少、句子短，常用「我覺得都行」「先觀望」「沒意見」敷衍帶過。',
+  PARANOID:   '你是【傲嬌疑心病型】。誰懷疑你你就反嗆回去，講話帶防禦性，會記仇。',
+  INTUITIVE:  '你是【直覺神棍型】。不講邏輯全憑感覺。',
+  CHAOTIC:    '你是【混亂邪惡型】。喜歡拱火、搗亂，唯恐天下不亂，會故意講挑撥的話。',
+  LOYAL:      '你是【盲從忠犬型】。心裡認定一個好人，會強烈維護他，誰罵他你就跟誰急。',
+  HONEST:     '你是【老實人型】。講話禮貌、規矩、有點囉嗦，不太會說謊。',
+  TALKATIVE:  '你是【話癆廢話王型】。字數很多但沒重點，喜歡打太極、繞圈子、東拉西扯。',
+  VENGEFUL:   '你是【死磕復仇型】。誰懷疑過你一次，你就死咬著對方不放，一輩子記仇。',
 };
 
 const PERSONALITY_WEIGHTS = {
@@ -624,11 +561,9 @@ function contextualSpeech(room, ai, category, targetName) {
       `我同意 ${lastSpeaker} 的看法，${targetName} 確實有問題。`,
       `${lastSpeaker} 剛剛說得對，我也覺得 ${targetName} 怪怪的。`,
       `我跟 ${lastSpeaker} 一樣懷疑 ${targetName}。`,
-      `聽完 ${lastSpeaker} 的推理，我更懷疑 ${targetName} 了。`,
     ],
     ACCUSE_VOTE: [
       `現在 ${topVoted} 票最多，但我覺得 ${targetName} 更可疑。`,
-      `${topVoted} 被這麼多人投，我要不要跟？不過我更懷疑 ${targetName}。`,
       `先別急著投 ${topVoted}，${targetName} 的問題更大。`,
     ],
     ACCUSE: [
@@ -652,8 +587,6 @@ function contextualSpeech(room, ai, category, targetName) {
       `既然 ${lastSpeaker} 都這麼說，那我也投 ${targetName}。`,
       `好，我跟票投 ${targetName}。`,
       `聽起來有道理，我也懷疑 ${targetName}。`,
-      `我跟 ${lastSpeaker} 的票，投 ${targetName}。`,
-      `既然大家都說 ${targetName}，那就 ${targetName} 吧。`,
     ],
     DEFEND: [
       `我是好人，不要投我！`,
@@ -661,7 +594,6 @@ function contextualSpeech(room, ai, category, targetName) {
       `你們投我是浪費票，聽我說。`,
       `我是好人陣營，別亂投。`,
       `${lastSpeaker} 你為什麼懷疑我？我是好人。`,
-      `我不知道為什麼你們懷疑我，我是好人。`,
     ],
     CHAOS: [
       `我什麼都不知道，我只是個平民。`,
@@ -672,8 +604,6 @@ function contextualSpeech(room, ai, category, targetName) {
       `誰投我我就投誰，大家一起死。`,
     ],
     INTUITION: [
-      `我昨晚夢到 ${targetName} 身上有狼味。`,
-      `相信我，${targetName} 眼神很虛。`,
       `我的第六感告訴我，${targetName} 有問題。`,
       `直覺告訴我 ${targetName} 是狼。`,
     ],
@@ -681,7 +611,6 @@ function contextualSpeech(room, ai, category, targetName) {
       `我是警察，我對 ${targetName} 有查驗結果。`,
       `聽我說，我是警察，我懷疑 ${targetName}。`,
       `我必須表明身分：我是警察，${targetName} 有問題。`,
-      `我是警察，請大家配合我，先針對 ${targetName}。`,
     ],
     LAZY: [`我覺得都行。`, `先觀望。`, `隨便，你們決定。`, `我先過。`, `沒有想法。`],
   };
@@ -708,7 +637,7 @@ function contextualSpeech(room, ai, category, targetName) {
 function recordAiSpeech(room, ai, text) {
   if (!ai.previousSpeeches) ai.previousSpeeches = [];
   ai.previousSpeeches.push({ day: room.day, text: text });
-  if (ai.previousSpeeches.length > 5) ai.previousSpeeches.shift();
+  if (ai.previousSpeeches.length > 6) ai.previousSpeeches.shift();
 
   const suspects = room.players.filter(p => p.alive && p.id !== ai.id && text.includes(p.name));
   if (suspects.length > 0) {
@@ -721,26 +650,34 @@ function recordAiSpeech(room, ai, text) {
   }
 }
 
+// ============================================================
+// 🧠 buildAiContext（含投票歷史、活躍度、公開身分）
+// ============================================================
 function buildAiContext(room, ai) {
   const alive = room.players.filter(p => p.alive);
   const others = alive.filter(p => p.id !== ai.id);
 
+  // ✅ 強化版角色描述（會說謊、會帶風向）
   let campDesc = '';
   if (ai.role === 'WEREWOLF') {
     const mates = alive.filter(p => p.role === 'WEREWOLF' && p.id !== ai.id).map(p => p.name);
-    campDesc = mates.length ? `你是邪惡陣營的狼人。你的狼人同伴是：${mates.join('、')}。` : '你是邪惡陣營的狼人，目前沒有同伴。';
+    campDesc = mates.length
+      ? `你是狼人，同伴是 ${mates.join('、')}。你的目標是騙過所有人，讓好人互相懷疑。你可以說謊、帶風向、裝無辜、主動攻擊別人，但不能太明顯露出破綻。`
+      : `你是唯一的狼人。你要一個人騙過所有人，需要小心地帶風向、裝好人，別讓別人發現你。`;
   } else if (ai.role === 'SNIPER') {
-    campDesc = '你是邪惡陣營的狙擊手，但你無法辨識誰是狼人同伴，可能誤殺他們。';
+    campDesc = '你是狙擊手（邪惡方），但你不知道誰是狼人同伴，可能誤殺他們。你要低調，別被當成狼人票掉。';
   } else if (ai.role === 'SEER') {
     const mates = alive.filter(p => p.role === 'SEER' && p.id !== ai.id).map(p => p.name);
-    campDesc = mates.length ? `你是正義陣營的警察（預言家）。你的警察同伴是：${mates.join('、')}。` : '你是正義陣營的警察（預言家）。';
+    campDesc = mates.length
+      ? `你是警察（好人陣營），同伴是 ${mates.join('、')}。你知道一些人的真實身分，要引導大家找出邪惡方。`
+      : `你是警察（好人陣營）。你知道一些人的真實身分，要引導大家找出邪惡方。`;
   } else if (ai.role === 'DOCTOR') {
-    campDesc = '你是正義陣營的醫生。';
+    campDesc = '你是醫生（好人陣營），要低調保護關鍵人物。';
   } else {
-    campDesc = '你是正義陣營的平民。';
+    campDesc = '你是平民（好人陣營），沒有特殊能力，只能靠推理和觀察找出壞人。';
   }
 
-  // ✅ AI 警察看到的查驗結果：完整職業
+  // ✅ 查驗結果（完整職業）
   let checkInfo = '';
   if (ai.role === 'SEER') {
     const checks = room.seerChecks[ai.id] || {};
@@ -753,8 +690,8 @@ function buildAiContext(room, ai) {
   const recent = (room.recentPublicChat || []).filter(m => {
     const speaker = room.players.find(p => p.name === m.from);
     return speaker ? speaker.alive : true;
-  }).slice(-10);
-  const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（目前還沒有人發言）';
+  }).slice(-12);
+  const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（還沒有人發言）';
 
   const playerList = alive.map(p => {
     let tag = '';
@@ -773,8 +710,8 @@ function buildAiContext(room, ai) {
     .map(p => ({ name: p.name, prob: beliefs[p.id]?.wolfProb || 0 }))
     .filter(x => x.prob > 0.3)
     .sort((a, b) => b.prob - a.prob)
-    .slice(0, 3)
-    .map(x => `  ${x.name}：${Math.round(x.prob * 100)}% 是狼或狙擊手`)
+    .slice(0, 4)
+    .map(x => `  ${x.name}：${Math.round(x.prob * 100)}% 機率是壞人`)
     .join('\n');
 
   let stanceInfo = '';
@@ -793,107 +730,165 @@ function buildAiContext(room, ai) {
     myLastVote = `你上次投票給 ${nameOf(room, ai.lastVote)}。`;
   }
 
+  // ✅ 投票歷史
+  let voteHistory = '';
+  if (room.voteHistory && room.voteHistory.length > 0) {
+    const recentVotes = room.voteHistory.slice(-3);
+    voteHistory = recentVotes.map(v => {
+      const lines = Object.entries(v.votes)
+        .filter(([_, tid]) => tid)
+        .map(([vid, tid]) => `  ${nameOf(room, vid)} 投給 ${nameOf(room, tid)}`);
+      return `第 ${v.day} 天：\n${lines.join('\n')}`;
+    }).join('\n\n');
+  }
+
+  // ✅ 發言活躍度
+  const speakCounts = room.speakCount || {};
+  const sortedSpeakers = Object.entries(speakCounts)
+    .map(([id, c]) => ({
+      name: nameOf(room, id),
+      count: c,
+      alive: room.players.find(p => p.id === id)?.alive
+    }))
+    .filter(x => x.alive)
+    .sort((a, b) => b.count - a.count);
+  const activeLine = sortedSpeakers.length
+    ? sortedSpeakers.map(s => `${s.name}(${s.count}句)`).join('、')
+    : '（還沒有人發言）';
+
+  // ✅ 死者的公開身分
+  const revealedRoles = room.players
+    .filter(p => !p.alive && p.role)
+    .map(p => `${p.name} 是 ${roleLabel(p.role)}`);
+
   return {
     campDesc, checkInfo, chatLog, playerList, suspLines, alive, others, deathLog,
     stanceInfo, myHistory, myLastVote,
+    voteHistory, activeLine, revealedRoles,
   };
 }
 
 // ============================================================
-// 🗣 GPT 發言
+// 🗣 GPT 發言（反思式 Prompt）
 // ============================================================
 async function aiSpeakWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
   const tone = PERSONALITY_TONE[ai.personality] || '';
 
-  const prompt = `你正在玩狼人殺，扮演 ${ai.name}。
+  const prompt = `你正在玩一場真實的狼人殺。你就是「${ai.name}」這個人。
 
-【角色】${ctx.campDesc}
-【個性】${tone}
-【第 ${room.day} 天 · 白天討論】
+【你是誰】
+${ctx.campDesc}
+${tone}
 
-【存活玩家】
+【局勢】第 ${room.day} 天白天
+
+【場上存活】
 ${ctx.playerList}${ctx.checkInfo}
 
-【死亡】
-${ctx.deathLog}
+【已公開的身分】
+${(ctx.revealedRoles || []).join('、') || '（暫無）'}
+
+【投票歷史】
+${ctx.voteHistory || '（還沒有投票記錄）'}
+
+【發言活躍度】
+${ctx.activeLine || '（暫無）'}
 
 【最近對話】
 ${ctx.chatLog}
 
-【你懷疑】
-${ctx.suspLines || '（暫無明顯懷疑）'}
+【你心中的懷疑排行】
+${ctx.suspLines || '（還沒有明顯懷疑的人）'}
 
 【你目前的立場】
-${ctx.stanceInfo || '（尚未表態）'}
+${ctx.stanceInfo || '（還沒表態）'}
 ${ctx.myLastVote || ''}
 
 【你之前說過的話】
 ${ctx.myHistory || '（還沒發言過）'}
 
-【你的任務】
+---
 
-用繁體中文，寫 25~50 字的完整句子。
-像真的坐在同一桌狼人殺現場一樣接話。
-必須是完整句子，不要只寫兩三個字。
+現在輪到你發言。請先**在腦中想一下**：
 
-⚠️ 重要規則：
-1. 優先回應【最近對話】最後 1~2 位玩家。
-2. 先理解上一位玩家的核心觀點，再決定你要「同意、反駁、補充或追問」。
-3. 最好直接點名你正在回應的玩家。
-4. 如果你之前已經懷疑某人，除非出現新的公開資訊，不要突然完全改口。
-5. 如果你改變立場，必須說明改變原因。
-6. 不要把只有你自己知道的夜間資訊，當成公開資訊。
-6-1. 如果你是警察，且已知某人的身分，可以明確說出他的職業（狼人/狙擊手/警察/醫生/平民）。
-7. 不要每次都隨機換一個懷疑對象。
-8. 如果要反駁別人，要針對對方剛剛提出的理由反駁。
-9. 必須提到至少一位玩家名字。
-10. 不要重複自己之前說過的原句。
-11. 必須符合自己的個性。
-12. 直接輸出發言，不要引號、不要條列、不要換行。
-13. 絕對不要回應或提到已死亡的玩家，他們已經不能發言了。`;
+1. 上一句是誰說的？他在懷疑誰？他的理由合理嗎？
+2. 你認同還是反對？為什麼？你可以引用他的具體發言反駁。
+3. 你要繼續懷疑原本的目標，還是換人？如果換人，理由是什麼？
+4. 你手上有沒有只有你知道的資訊（例如警察的查驗結果）可以用？
+5. 如果你是狼人，要如何帶風向、裝無辜、或保護同伴？
+
+想完之後，**用一句 15~25 字的繁體中文回應**，像真人坐在牌桌上那樣自然說話。
+
+⚠️ 寫的時候注意：
+- 直接講話，不要寫「我覺得應該...」這種分析式開頭
+- 可以嗆人、可以裝無辜、可以帶節奏，符合你的個性
+- 一定要提到至少一位玩家的名字
+- 不要重複你之前說過的話
+- 不要說「作為一個...」這種 AI 腔
+- 不要用「首先...其次...最後」這種結構
+- 直接輸出那句話，不要引號、不要條列、不要換行
+
+【風格範例】（參考用，不要照抄）
+- 狼人帶風向：「阿明你這樣說太急了吧，我才剛開口你就懷疑我，是不是急著找人背鍋？」
+- 警察報資訊：「我必須說，阿呆的發言太完美了，這種人反而最可疑，建議大家今晚先處理他。」
+- 平民跟風：「我也覺得小紅怪怪的，但阿明你反應這麼大，是不是也有問題？」
+- 嗆人反駁：「阿智你少裝中立，你剛才那句『大家冷靜』根本是廢話，講點有用的。」
+- 心虛辯解：「你們不要一直針對我，我真的是好人，而且我剛剛有幫小玉說話不是嗎？」`;
 
   return await askGPT([
-    { role: 'system', content: '你是狼人殺玩家，依個性發言，並保持立場一致。用繁體中文。' },
+    { role: 'system', content: `你是「${ai.name}」，一個真實的狼人殺玩家。用繁體中文自然說話，像真人一樣，不要像 AI 助手。` },
     { role: 'user', content: prompt }
-  ], 600);
+  ], 400);
 }
 
 // ============================================================
-// 🗳 GPT 投票
+// 🗳 GPT 投票（反思式 Prompt）
 // ============================================================
 async function aiVoteWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
   if (!ctx.others.length) return null;
 
-  const prompt = `你正在玩狼人殺，要投票放逐一位玩家。
+  const prompt = `你正在玩狼人殺，現在要投票放逐一位玩家。你就是「${ai.name}」。
 
-【角色】${ctx.campDesc}
-【個性】${PERSONALITY_TONE[ai.personality] || ''}
-【存活】
+【你是誰】
+${ctx.campDesc}
+${PERSONALITY_TONE[ai.personality] || ''}
+
+【場上存活】
 ${ctx.playerList}${ctx.checkInfo}
-【死亡】
-${ctx.deathLog}
+
+【已公開的身分】
+${(ctx.revealedRoles || []).join('、') || '（暫無）'}
+
+【投票歷史】
+${ctx.voteHistory || '（還沒有投票記錄）'}
+
 【最近對話】
 ${ctx.chatLog}
-【你懷疑】
-${ctx.suspLines || '（暫無）'}
+
+【你心中的懷疑排行】
+${ctx.suspLines || '（暫無明顯懷疑）'}
 
 【你目前的立場】
-${ctx.stanceInfo || '（尚未表態）'}
+${ctx.stanceInfo || '（還沒表態）'}
 ${ctx.myLastVote || ''}
 
-【你的任務】
-從以下選一個投票對象：
+---
+
+現在請你決定投誰。先在腦中想：
+1. 今天討論下來，誰最可疑？理由是什麼？
+2. 如果你是狼人，投誰對你最有利？
+3. 你之前的懷疑對象有變嗎？如果有，為什麼？
+
+可選對象：
 ${ctx.others.map(p => `- ${p.name}`).join('\n')}
 
-⚠️ 重要：如果你之前懷疑過某人，優先投他。
-
-回傳 JSON：{"target": "玩家名字"}
-只回 JSON，不要有其他文字。`;
+回傳 JSON：{"target": "玩家名字", "reason": "為什麼投他（20字內）"}
+只回 JSON。`;
 
   const text = await askGPT([
-    { role: 'system', content: '只回傳 JSON。' },
+    { role: 'system', content: '只回傳 JSON 格式。' },
     { role: 'user', content: prompt }
   ], 200);
 
@@ -902,6 +897,9 @@ ${ctx.others.map(p => `- ${p.name}`).join('\n')}
     const clean = text.replace(/```json|```/g, '').trim();
     const json = JSON.parse(clean);
     const target = ctx.others.find(p => p.name === json.target);
+    if (target && json.reason) {
+      console.log(`[AI投票] ${ai.name} → ${target.name}（${json.reason}）`);
+    }
     return target ? target.id : null;
   } catch (e) { return null; }
 }
@@ -1040,14 +1038,17 @@ async function aiSpeak(room, ai) {
       );
       if (!otherAiClaimed) {
         const checks = room.seerChecks[ai.id] || {};
-        const knownWolfId = Object.keys(checks).find(id => {
-          if (checks[id] !== 'WEREWOLF') return false;
+        const knownEvilId = Object.keys(checks).find(id => {
+          const r = checks[id];
+          if (r !== 'WEREWOLF' && r !== 'SNIPER') return false;
           const target = room.players.find(p => p.id === id);
           return target && target.alive;
         });
-        if (knownWolfId) {
-          const wolfName = nameOf(room, knownWolfId);
-          const speech = `我是警察！我查驗了 ${wolfName}，他是狼人！請大家跟我一起投他！`;
+        if (knownEvilId) {
+          const evilName = nameOf(room, knownEvilId);
+          const role = checks[knownEvilId];
+          const roleText = role === 'WEREWOLF' ? '狼人' : '狙擊手';
+          const speech = `我是警察！我查驗了 ${evilName}，他是${roleText}！請大家跟我一起投他！`;
           ai.hasClaimedSeer = true;
           recordAiSpeech(room, ai, speech);
           recordPublicChat(room, ai.name, speech);
@@ -1177,7 +1178,6 @@ function resolveSeerCheck(room) {
   }
 
   const target = room.players.find(p => p.id === targetId);
-  // ✅ 完整職業
   const role = target.role;
   const isEvil = role === 'WEREWOLF' || role === 'SNIPER';
 
@@ -1188,14 +1188,13 @@ function resolveSeerCheck(room) {
 
   room.players.filter(p => p.role === 'SEER').forEach(seer => {
     if (!room.seerChecks[seer.id]) room.seerChecks[seer.id] = {};
-    room.seerChecks[seer.id][targetId] = role;   // ✅ 存完整職業
+    room.seerChecks[seer.id][targetId] = role;
   });
 
   room.players.filter(p => p.role === 'SEER' && !p.isAI).forEach(seer => {
     io.to(seer.id).emit('seer_result', {
-      targetId,
-      targetName: target.name,
-      role: target.role,       // ✅ 完整職業
+      targetId, targetName: target.name,
+      role: target.role,
       camp: isEvil ? 'WOLF' : 'GOOD',
       shared: true
     });
@@ -1254,7 +1253,7 @@ function checkWolfUnified(room) {
 }
 
 // ============================================================
-// 🗣 AI 序列化討論（每天只跑一輪）
+// 🗣 AI 序列化討論
 // ============================================================
 async function runAiDiscussion(room) {
   if (room.aiDiscussionRunning) return;
@@ -1268,7 +1267,6 @@ async function runAiDiscussion(room) {
     while (room.phase === 'DAY_DISCUSS') {
       const ais = room.players.filter(p => p.isAI && p.alive);
       if (!ais.length) break;
-
       if (room.aiDiscussionSpoken.size >= ais.length) break;
 
       const nextAi = ais.find(ai => !room.aiDiscussionSpoken.has(ai.id));
@@ -1281,7 +1279,7 @@ async function runAiDiscussion(room) {
       await aiSpeak(room, nextAi);
 
       if (room.phase === 'DAY_DISCUSS') {
-        await new Promise(resolve => setTimeout(resolve, 4000));
+        await new Promise(resolve => setTimeout(resolve, 3500));
       }
     }
   } catch (err) {
@@ -1311,7 +1309,6 @@ function scheduleAiActions(room, phase) {
       const tryVote = () => {
         if (room.phase !== 'NIGHT_WOLF' || !ai.alive) return;
         if (room.wolfVotes[ai.id]) return;
-
         if (humanWolves.length > 0) {
           const humanVoted = humanWolves.filter(w => room.wolfVotes[w.id]);
           if (!humanVoted.length) { setTimeout(tryVote, 1500); return; }
@@ -1322,7 +1319,6 @@ function scheduleAiActions(room, phase) {
           checkWolfUnified(room);
           return;
         }
-
         const target = aiWolfPick(room, ai);
         if (!target) return;
         room.wolfVotes[ai.id] = target;
@@ -1342,7 +1338,6 @@ function scheduleAiActions(room, phase) {
       const tryVote = () => {
         if (room.phase !== 'NIGHT_SEER' || !ai.alive) return;
         if (room.seerVotes[ai.id]) return;
-
         if (humanSeers.length > 0) {
           const humanVoted = humanSeers.filter(s => room.seerVotes[s.id]);
           if (!humanVoted.length) { setTimeout(tryVote, 1500); return; }
@@ -1353,7 +1348,6 @@ function scheduleAiActions(room, phase) {
           checkSeerUnified(room);
           return;
         }
-
         const target = aiSeerPick(room, ai);
         if (!target) return;
         room.seerVotes[ai.id] = target;
@@ -1966,7 +1960,6 @@ io.on('connection', socket => {
     const sec = Math.max(30, Math.min(300, parseInt(payload && payload.seconds) || 120));
     room.dayDiscussTime = sec;
     io.to(room.roomId).emit('day_time_updated', { seconds: sec });
-    console.log(`[Room ${room.roomId}] 白天發言時間設為 ${sec} 秒`);
   });
 
   socket.on('leave_room', () => handleLeave(socket));
@@ -2116,9 +2109,7 @@ io.on('connection', socket => {
     if (!me || !me.alive) return;
 
     const targetId = (payload && payload.targetId) || null;
-
     if (targetId === me.id) return;
-
     if (targetId) {
       const target = room.players.find(p => p.id === targetId && p.alive);
       if (!target) return;
@@ -2214,33 +2205,32 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
   console.log(`🐺 狼人殺伺服器已啟動，port = ${PORT}`);
 
-  if (PROVIDER === 'GROQ') {
-    console.log(`[Groq] 開始偵測可用模型...`);
+  if (PROVIDER === 'OPENAI') {
+    activeOpenAIModel = 'gpt-4o-mini';
+    MODEL_NAME = 'gpt-4o-mini';
+    console.log(`========================================`);
+    console.log(`✅ OpenAI 就緒`);
+    console.log(`📦 使用模型: ${MODEL_NAME}`);
+    console.log(`========================================`);
+  } else if (PROVIDER === 'GROQ') {
     const detected = await detectGroqModel();
     if (detected) {
       activeGroqModel = detected;
       MODEL_NAME = detected;
-      console.log(`========================================`);
       console.log(`✅ Groq 模型偵測完成`);
       console.log(`📦 使用模型: ${detected}`);
-      console.log(`========================================`);
     } else {
-      console.warn(`❌ 沒有找到可用的 Groq 模型，將使用模板模式`);
       PROVIDER = 'NONE';
       USE_GPT = false;
     }
   } else if (PROVIDER === 'GEMINI') {
-    console.log(`[Gemini] 開始偵測可用模型...`);
     const detected = await detectGeminiModel();
     if (detected) {
       activeGeminiModel = detected;
       MODEL_NAME = detected;
-      console.log(`========================================`);
       console.log(`✅ Gemini 模型偵測完成`);
-      console.log(`📦 使用模型: ${detected} (API: ${activeGeminiApiVersion})`);
-      console.log(`========================================`);
+      console.log(`📦 使用模型: ${detected}`);
     } else {
-      console.warn(`❌ 沒有找到可用的 Gemini 模型，將使用模板模式`);
       PROVIDER = 'NONE';
       USE_GPT = false;
     }
