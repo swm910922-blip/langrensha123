@@ -1,5 +1,5 @@
 // ============================================================
-// 狼人殺後端 v12.0（OpenAI + 深度思考 + 說謊帶風向）
+// 狼人殺後端 v12.1（OpenAI + 開場/回應分離 + 深度思考）
 // ============================================================
 const express = require('express');
 const http = require('http');
@@ -40,11 +40,10 @@ const GEMINI_MODEL_CANDIDATES = [
   'gemini-3.1-flash-lite',
 ];
 
-// ✅ OpenAI 模型候選（優先順序）
 const OPENAI_MODEL_CANDIDATES = [
-  'gpt-4o-mini',       // 便宜、快、遵循指令好
-  'gpt-4o',            // 更聰明，較貴
-  'gpt-4-turbo',       // 備用
+  'gpt-4o-mini',
+  'gpt-4o',
+  'gpt-4-turbo',
 ];
 
 let activeGroqModel = null;
@@ -190,7 +189,6 @@ function enqueue(fn) {
 async function callGroq(messages, maxTokens) {
   const model = activeGroqModel || MODEL_NAME;
   const MAX_RETRY = 3;
-  let lastErr = null;
   for (let attempt = 0; attempt < MAX_RETRY; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000);
@@ -201,7 +199,7 @@ async function callGroq(messages, maxTokens) {
           'Authorization': `Bearer ${GROQ_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.9 }),
+        body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.95 }),
         signal: controller.signal,
       });
       clearTimeout(timeout);
@@ -214,7 +212,6 @@ async function callGroq(messages, maxTokens) {
       return data.choices?.[0]?.message?.content?.trim() || null;
     } catch (e) {
       clearTimeout(timeout);
-      lastErr = e.message;
     }
   }
   return null;
@@ -301,8 +298,8 @@ async function callOpenAI(messages, maxTokens) {
           messages,
           max_tokens: maxTokens,
           temperature: 0.95,
-          presence_penalty: 0.6,      // ✅ 避免重複用詞
-          frequency_penalty: 0.4,     // ✅ 增加用詞多樣性
+          presence_penalty: 0.6,
+          frequency_penalty: 0.4,
         }),
         signal: controller.signal,
       });
@@ -509,13 +506,12 @@ const AI_PERSONALITIES = [
   'CHAOTIC', 'LOYAL', 'HONEST', 'TALKATIVE', 'VENGEFUL',
 ];
 
-// ✅ 強化版個性描述（更有畫面感）
 const PERSONALITY_TONE = {
   ANALYTICAL: '你是【冷靜分析型】。講話有條理，會引用具體發言或投票紀錄推理，語氣冷靜、不帶情緒。',
   IMPULSIVE:  '你是【衝動跟風型】。講話直率、情緒化，常用「！」，容易被別人帶風向，也容易反悔。',
   LAZY:       '你是【划水佛系型】。話很少、句子短，常用「我覺得都行」「先觀望」「沒意見」敷衍帶過。',
   PARANOID:   '你是【傲嬌疑心病型】。誰懷疑你你就反嗆回去，講話帶防禦性，會記仇。',
-  INTUITIVE:  '你是【直覺神棍型】。不講邏輯全憑感覺。',
+  INTUITIVE:  '你是【直覺神棍型】。不講邏輯全憑感覺，會說「我夢到 XX 有狼味」「XX 眼神心虛」這類話。',
   CHAOTIC:    '你是【混亂邪惡型】。喜歡拱火、搗亂，唯恐天下不亂，會故意講挑撥的話。',
   LOYAL:      '你是【盲從忠犬型】。心裡認定一個好人，會強烈維護他，誰罵他你就跟誰急。',
   HONEST:     '你是【老實人型】。講話禮貌、規矩、有點囉嗦，不太會說謊。',
@@ -604,6 +600,8 @@ function contextualSpeech(room, ai, category, targetName) {
       `誰投我我就投誰，大家一起死。`,
     ],
     INTUITION: [
+      `我昨晚夢到 ${targetName} 身上有狼味。`,
+      `相信我，${targetName} 眼神很虛。`,
       `我的第六感告訴我，${targetName} 有問題。`,
       `直覺告訴我 ${targetName} 是狼。`,
     ],
@@ -651,13 +649,12 @@ function recordAiSpeech(room, ai, text) {
 }
 
 // ============================================================
-// 🧠 buildAiContext（含投票歷史、活躍度、公開身分）
+// 🧠 buildAiContext（分離今天 vs 歷史）
 // ============================================================
 function buildAiContext(room, ai) {
   const alive = room.players.filter(p => p.alive);
   const others = alive.filter(p => p.id !== ai.id);
 
-  // ✅ 強化版角色描述（會說謊、會帶風向）
   let campDesc = '';
   if (ai.role === 'WEREWOLF') {
     const mates = alive.filter(p => p.role === 'WEREWOLF' && p.id !== ai.id).map(p => p.name);
@@ -677,7 +674,6 @@ function buildAiContext(room, ai) {
     campDesc = '你是平民（好人陣營），沒有特殊能力，只能靠推理和觀察找出壞人。';
   }
 
-  // ✅ 查驗結果（完整職業）
   let checkInfo = '';
   if (ai.role === 'SEER') {
     const checks = room.seerChecks[ai.id] || {};
@@ -686,12 +682,6 @@ function buildAiContext(room, ai) {
     );
     if (lines.length) checkInfo = `\n【你已知的查驗結果】\n${lines.join('\n')}`;
   }
-
-  const recent = (room.recentPublicChat || []).filter(m => {
-    const speaker = room.players.find(p => p.name === m.from);
-    return speaker ? speaker.alive : true;
-  }).slice(-12);
-  const chatLog = recent.length ? recent.map(m => `${m.from}：${m.text}`).join('\n') : '（還沒有人發言）';
 
   const playerList = alive.map(p => {
     let tag = '';
@@ -730,7 +720,6 @@ function buildAiContext(room, ai) {
     myLastVote = `你上次投票給 ${nameOf(room, ai.lastVote)}。`;
   }
 
-  // ✅ 投票歷史
   let voteHistory = '';
   if (room.voteHistory && room.voteHistory.length > 0) {
     const recentVotes = room.voteHistory.slice(-3);
@@ -742,7 +731,6 @@ function buildAiContext(room, ai) {
     }).join('\n\n');
   }
 
-  // ✅ 發言活躍度
   const speakCounts = room.speakCount || {};
   const sortedSpeakers = Object.entries(speakCounts)
     .map(([id, c]) => ({
@@ -756,24 +744,53 @@ function buildAiContext(room, ai) {
     ? sortedSpeakers.map(s => `${s.name}(${s.count}句)`).join('、')
     : '（還沒有人發言）';
 
-  // ✅ 死者的公開身分
   const revealedRoles = room.players
     .filter(p => !p.alive && p.role)
     .map(p => `${p.name} 是 ${roleLabel(p.role)}`);
 
+  // ✅ 今天的對話（只算今天、過濾死者與系統訊息）
+  const todayMessages = (room.recentPublicChat || [])
+    .filter(m => m.day === room.day)
+    .filter(m => !m.system)
+    .filter(m => {
+      const speaker = room.players.find(p => p.name === m.from);
+      return speaker ? speaker.alive : false;
+    });
+  const todayChatLog = todayMessages.length
+    ? todayMessages.map(m => `${m.from}：${m.text}`).join('\n')
+    : '（今天還沒有人發言）';
+
+  // ✅ 歷史對話（前幾天，只保留最近 8 條）
+  const historyMessages = (room.recentPublicChat || [])
+    .filter(m => m.day < room.day)
+    .filter(m => !m.system)
+    .filter(m => {
+      const speaker = room.players.find(p => p.name === m.from);
+      return speaker ? speaker.alive : false;
+    })
+    .slice(-8);
+  const historyChatLog = historyMessages.length
+    ? historyMessages.map(m => `第${m.day}天 ${m.from}：${m.text}`).join('\n')
+    : '（暫無）';
+
+  const todaySpeechCount = todayMessages.length;
+
   return {
-    campDesc, checkInfo, chatLog, playerList, suspLines, alive, others, deathLog,
+    campDesc, checkInfo, playerList, suspLines, alive, others, deathLog,
     stanceInfo, myHistory, myLastVote,
     voteHistory, activeLine, revealedRoles,
+    todayChatLog, historyChatLog, todaySpeechCount,
   };
 }
 
 // ============================================================
-// 🗣 GPT 發言（反思式 Prompt）
+// 🗣 GPT 發言（開場 vs 回應分離）
 // ============================================================
 async function aiSpeakWithGPT(room, ai) {
   const ctx = buildAiContext(room, ai);
   const tone = PERSONALITY_TONE[ai.personality] || '';
+  const speechOrder = ctx.todaySpeechCount + 1;
+  const isFirstSpeaker = speechOrder === 1;
 
   const prompt = `你正在玩一場真實的狼人殺。你就是「${ai.name}」這個人。
 
@@ -781,7 +798,7 @@ async function aiSpeakWithGPT(room, ai) {
 ${ctx.campDesc}
 ${tone}
 
-【局勢】第 ${room.day} 天白天
+【局勢】第 ${room.day} 天白天，你是今天第 ${speechOrder} 個發言的人
 
 【場上存活】
 ${ctx.playerList}${ctx.checkInfo}
@@ -789,14 +806,11 @@ ${ctx.playerList}${ctx.checkInfo}
 【已公開的身分】
 ${(ctx.revealedRoles || []).join('、') || '（暫無）'}
 
-【投票歷史】
-${ctx.voteHistory || '（還沒有投票記錄）'}
+【今天已經發言過的（只有這些是真實的，不要捏造）】
+${ctx.todayChatLog}
 
-【發言活躍度】
-${ctx.activeLine || '（暫無）'}
-
-【最近對話】
-${ctx.chatLog}
+【前幾天的對話（背景參考，不要直接回應）】
+${ctx.historyChatLog}
 
 【你心中的懷疑排行】
 ${ctx.suspLines || '（還沒有明顯懷疑的人）'}
@@ -810,34 +824,46 @@ ${ctx.myHistory || '（還沒發言過）'}
 
 ---
 
-現在輪到你發言。請先**在腦中想一下**：
+${isFirstSpeaker ? `⚠️ **你是今天第一個發言的人**
 
-1. 上一句是誰說的？他在懷疑誰？他的理由合理嗎？
-2. 你認同還是反對？為什麼？你可以引用他的具體發言反駁。
-3. 你要繼續懷疑原本的目標，還是換人？如果換人，理由是什麼？
-4. 你手上有沒有只有你知道的資訊（例如警察的查驗結果）可以用？
-5. 如果你是狼人，要如何帶風向、裝無辜、或保護同伴？
+現在場上還沒有人說話，所以你應該：
+- 主動開場，提出你對某人的懷疑或想法
+- 說出你昨晚或今天的觀察
+- **不要回應任何人**（今天沒人說話，沒人能被你回應）
+- **不要引用前幾天的對話當作「剛剛有人說」**
 
-想完之後，**用一句 15~25 字的繁體中文回應**，像真人坐在牌桌上那樣自然說話。
+✅ 開場範例：
+- 「昨晚沒什麼動靜，不過我覺得阿明昨天投票的動作很奇怪。」
+- 「我先說我的想法：小紅昨天一直帶風向，我覺得她不太對。」
+- 「我先來，昨天阿呆的反應太奇怪了，今天要盯他。」`
+: `⚠️ **今天前面已經有 ${ctx.todaySpeechCount} 個人發言過**
 
-⚠️ 寫的時候注意：
-- 直接講話，不要寫「我覺得應該...」這種分析式開頭
-- 可以嗆人、可以裝無辜、可以帶節奏，符合你的個性
-- 一定要提到至少一位玩家的名字
-- 不要重複你之前說過的話
-- 不要說「作為一個...」這種 AI 腔
-- 不要用「首先...其次...最後」這種結構
-- 直接輸出那句話，不要引號、不要條列、不要換行
+你應該：
+- **優先回應【今天已經發言過的】最後 1~2 位玩家**
+- 針對他說的具體內容回應（同意 / 反駁 / 補充）
+- 可以延續或改變懷疑對象，但要有理由
+- **不要回應前幾天的人或話**（那些只是背景）`}
 
-【風格範例】（參考用，不要照抄）
+---
+
+【發言規則】
+1. 用繁體中文，15~25 字，**一句話**（不要換行、不要條列）
+2. 像真人坐在牌桌上自然說話，不要像 AI 助手
+3. 符合你的個性
+4. 一定要提到至少一位**今天還活著**的玩家名字
+5. 不要重複你之前說過的原句
+6. **絕對不要捏造**：不要假裝有人說過他沒說過的話
+7. **不要提到已死亡的玩家**（除了已公開身分可提）
+8. 直接輸出那句話，不要引號、不要「我覺得應該...」的分析腔
+
+【風格範例】
 - 狼人帶風向：「阿明你這樣說太急了吧，我才剛開口你就懷疑我，是不是急著找人背鍋？」
 - 警察報資訊：「我必須說，阿呆的發言太完美了，這種人反而最可疑，建議大家今晚先處理他。」
 - 平民跟風：「我也覺得小紅怪怪的，但阿明你反應這麼大，是不是也有問題？」
-- 嗆人反駁：「阿智你少裝中立，你剛才那句『大家冷靜』根本是廢話，講點有用的。」
-- 心虛辯解：「你們不要一直針對我，我真的是好人，而且我剛剛有幫小玉說話不是嗎？」`;
+- 嗆人反駁：「阿智你少裝中立，你剛才那句『大家冷靜』根本是廢話，講點有用的。」`;
 
   return await askGPT([
-    { role: 'system', content: `你是「${ai.name}」，一個真實的狼人殺玩家。用繁體中文自然說話，像真人一樣，不要像 AI 助手。` },
+    { role: 'system', content: `你是「${ai.name}」，一個真實的狼人殺玩家。用繁體中文自然說話，像真人一樣。絕對不能捏造別人說過的話。` },
     { role: 'user', content: prompt }
   ], 400);
 }
@@ -861,11 +887,11 @@ ${ctx.playerList}${ctx.checkInfo}
 【已公開的身分】
 ${(ctx.revealedRoles || []).join('、') || '（暫無）'}
 
-【投票歷史】
-${ctx.voteHistory || '（還沒有投票記錄）'}
+【今天已經發言過的】
+${ctx.todayChatLog}
 
-【最近對話】
-${ctx.chatLog}
+【前幾天的對話（背景參考）】
+${ctx.historyChatLog}
 
 【你心中的懷疑排行】
 ${ctx.suspLines || '（暫無明顯懷疑）'}
@@ -876,10 +902,10 @@ ${ctx.myLastVote || ''}
 
 ---
 
-現在請你決定投誰。先在腦中想：
+現在請決定投誰。先想：
 1. 今天討論下來，誰最可疑？理由是什麼？
 2. 如果你是狼人，投誰對你最有利？
-3. 你之前的懷疑對象有變嗎？如果有，為什麼？
+3. 你之前的懷疑對象有變嗎？
 
 可選對象：
 ${ctx.others.map(p => `- ${p.name}`).join('\n')}
@@ -947,10 +973,12 @@ function trackSpeak(room, speakerId) {
   if (!room.speakCount) room.speakCount = {};
   room.speakCount[speakerId] = (room.speakCount[speakerId] || 0) + 1;
 }
+
+// ✅ 加上 day 欄位
 function recordPublicChat(room, fromName, text) {
   if (!room.recentPublicChat) room.recentPublicChat = [];
-  room.recentPublicChat.push({ from: fromName, text, ts: Date.now() });
-  if (room.recentPublicChat.length > 100) room.recentPublicChat.shift();
+  room.recentPublicChat.push({ from: fromName, text, ts: Date.now(), day: room.day });
+  if (room.recentPublicChat.length > 120) room.recentPublicChat.shift();
 }
 
 function decideTargetByBelief(room, ai, context) {
@@ -1606,6 +1634,12 @@ function nextAfterDoctor(room) {
 // 🎮 遊戲開始 / 初始化
 // ============================================================
 function startGame(room) {
+  // ✅ 開局前徹底清空所有對話記憶
+  room.recentPublicChat = [];
+  room.speakCount = {};
+  room.voteHistory = [];
+  room.aiDiscussionSpoken = new Set();
+
   const n = room.players.length;
   const roles = assignRoles(n);
   room.players.forEach((p, i) => {
@@ -1640,12 +1674,8 @@ function startGame(room) {
   room.doctorShotsLeft = doctorShotsFor(n);
   room.sniperShotsLeft = sniperShotsFor(n);
   room.emptyShotCount = {};
-  room.recentPublicChat = [];
-  room.speakCount = {};
-  room.voteHistory = [];
   room.voteFinalizeScheduled = false;
   room.aiDiscussionRunning = false;
-  room.aiDiscussionSpoken = new Set();
 
   initBeliefs(room);
 
@@ -1899,6 +1929,28 @@ io.on('connection', socket => {
     if (room.phase !== 'LOBBY') return cb && cb({ ok:false, error:'遊戲已開始' });
     if (room.players.length >= 18) return cb && cb({ ok:false, error:'房間已滿' });
     if (room.players.some(p => p.name === nickname)) return cb && cb({ ok:false, error:'暱稱已被使用' });
+
+    // ✅ 偵測殘留資料，自動重置
+    if (room.recentPublicChat?.length > 0 || room.voteHistory?.length > 0) {
+      console.log(`[Room ${roomId}] 偵測到殘留資料，自動重置`);
+      room.day = 0;
+      room.votes = {}; room.wolfVotes = {}; room.wolfTarget = null;
+      room.seerChecks = {}; room.seerVotes = {}; room.seerResolved = false;
+      room.pendingDeaths = []; room.doctorTarget = null; room.sniperTarget = null;
+      room.emptyShotCount = {};
+      room.aiIntel = {}; room.aiBeliefs = {};
+      room.recentPublicChat = [];
+      room.speakCount = {}; room.voteHistory = [];
+      room.voteFinalizeScheduled = false;
+      room.aiDiscussionRunning = false;
+      room.aiDiscussionSpoken = new Set();
+      room.players.forEach(p => {
+        p.alive = true; p.role = null; p.deathCause = null;
+        p.canSpeakInPublic = false; p.hasClaimedSeer = false;
+        p.revengeTarget = null; p.loyalTarget = null;
+        p.stance = null; p.previousSpeeches = []; p.lastVote = null;
+      });
+    }
 
     room.players.push({
       id:socket.id, name:nickname, alive:true, isHost:false, role:null, isAI:false,
